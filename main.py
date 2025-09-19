@@ -3,8 +3,8 @@
 Main worker for Crypto Signal (Railway ready)
 
 - Splits symbols into 6 blocks and scans twice per hour:
-  block1 at :05 & :35, block2 at :08 & :38, block3 at :11 & :41,
-  block4 at :14 & :44, block5 at :17 & :47, block6 at :20 & :50 (Asia/Ho_Chi_Minh)
+  block1 at :00 & :30, block2 at :05 & :35, block3 at :10 & :40,
+  block4 at :15 & :45, block5 at :20 & :50, block6 at :25 & :55 (Asia/Ho_Chi_Minh)
 - Workflow per symbol:
   1) fetch OHLCV for 1H/4H/1D (1H drop partial bar; 4H/1D keep realtime)
   2) enrich indicators (EMA/RSI/BB/ATR/volume, candle anatomy)
@@ -252,10 +252,10 @@ def split_into_6_blocks(symbols: List[str]) -> List[List[str]]:
     return [symbols[i::6] for i in range(6)]
 
 def which_block_for_minute(minute: int):
-    # Twice per hour schedule for 6 blocks (VN time)
+    # Twice per hour schedule for 6 blocks (VN time, every 5 minutes)
     mapping = {
-        5: 0,  8: 1, 11: 2, 14: 3, 17: 4, 20: 5,
-        35: 0, 38: 1, 41: 2, 44: 3, 47: 4, 50: 5
+        0: 0,  5: 1, 10: 2, 15: 3, 20: 4, 25: 5,
+        30: 0, 35: 1, 40: 2, 45: 3, 50: 4, 55: 5,
     }
     return mapping.get(minute % 60)
 
@@ -593,8 +593,8 @@ def loop_scheduler():
 
     log.info(f"Universe size={len(symbols)}; block sizes={[len(b) for b in blocks]}")
     log.info("Schedule each hour (Asia/Ho_Chi_Minh): "
-             "block1 at :05 & :35, block2 at :08 & :38, block3 at :11 & :41, "
-             "block4 at :14 & :44, block5 at :17 & :47, block6 at :20 & :50")
+             "block1 at :00 & :30, block2 at :05 & :35, block3 at :10 & :40, "
+             "block4 at :15 & :45, block5 at :20 & :50, block6 at :25 & :55")
 
     last_tick = None
     last_kpi_day = None  # NEW: để gửi KPI 1 lần/ngày
