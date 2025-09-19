@@ -1,0 +1,7 @@
+ccxt
+pandas>=2.0
+numpy>=1.24
+pydantic>=2.6
+requests>=2.31
+tzdata
+python-telegram-bot>=21.0,<22.0
