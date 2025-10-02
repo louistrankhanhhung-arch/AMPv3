@@ -185,7 +185,7 @@ def fetch_ohlcv(
     """
     Fetch OHLCV for a single timeframe.
     - If `ex` is provided, reuse it (no new load_markets()).
-    - Drop partial bar only for 1H when `drop_partial=True`.
+    - Drop partial bar for 15m & 1H when `drop_partial=True`.
     - Robust backoff with jitter on 429000 / Too many requests.
     """
     tf_str = TIMEFRAME_MAP.get(timeframe.upper(), timeframe)
@@ -199,8 +199,8 @@ def fetch_ohlcv(
         try:
             raw = _ex.fetch_ohlcv(sym, timeframe=tf_str, since=since_ms, limit=limit)
             df = _to_dataframe(raw)
-            # chỉ cắt nến chưa đóng nếu là timeframe 1H (và cờ drop_partial bật)
-            if drop_partial and timeframe.upper() in ("15M","1H") and not df.empty:
+            # chỉ cắt nến chưa đóng nếu là timeframe 15m/1H (và cờ drop_partial bật)
+            if drop_partial and timeframe.upper() in ("15M", "1H") and not df.empty:
                 df = _drop_partial_bar(df, _bar_ms(_ex, tf_str))
             return df
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout) as e:
@@ -309,8 +309,8 @@ def fetch_ohlcv_history(
     if end_ms is not None:
         out = out[out.index <= pd.to_datetime(end_ms, unit="ms", utc=True)]
 
-    # Only drop partial bar for 15m & 1H timeframes
-    if drop_partial and tf_str == "1h" and not out.empty:
+    # Only drop partial bar for 15m & 1H timeframe
+    if drop_partial and tf_str in ("15m", "1h") and not out.empty:
         out = _drop_partial_bar(out, bar_ms)
 
     return out
