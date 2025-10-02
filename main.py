@@ -22,7 +22,7 @@ import pandas as pd
 import requests
 
 from universe import get_universe_from_env  # uses DEFAULT_UNIVERSE if SYMBOLS not set
-from kucoin_api import fetch_batch, _exchange  # spot-only; 1H drop-partial
+from kucoin_api import fetch_batch, _exchange  # spot-only; 15m/1H drop-partial
 from indicators import enrich_indicators, enrich_more
 from feature_primitives import compute_features_by_tf
 from engine_adapter import decide
@@ -33,6 +33,7 @@ from storage import SignalPerfDB, JsonStore, UserDB
 from templates import render_update, render_teaser
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+# Bổ sung intraday 5m/15m vào vòng fetch để intraday_core có dữ liệu
 TIMEFRAMES = ("5m", "15m", "1H", "4H", "1D")
 
 log = logging.getLogger("worker")
