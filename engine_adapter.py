@@ -229,6 +229,24 @@ def decide(symbol: str, timeframe: str, features_by_tf: Dict[str, Dict[str, Any]
     cfg = SideCfg()
     dec = run_side_state_core(features_by_tf, eb, cfg)
 
+    # Hard guard: không bao giờ cho phép ENTER khi thiếu setup/side
+    try:
+        if (str(getattr(dec, "decision", "")).upper() == "ENTER" and
+            (getattr(dec, "side", None) not in ("long", "short") or
+             getattr(getattr(dec, "setup", None), "entry", None) is None or
+             getattr(getattr(dec, "setup", None), "sl", None) is None)):
+            # đổi về WAIT + gắn reason để nhìn rõ trên log
+            dec.decision = "WAIT"
+            try:
+                rs = list(getattr(dec, "reasons", []) or [])
+                if "no_setup" not in rs:
+                    rs.append("no_setup")
+                dec.reasons = rs
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     # -------- REVERSAL GUARD (filter before release) --------
     # Dùng style (side, df4, df1) để chắc chắn dùng đúng DataFrame đã đóng nến.
     try:
