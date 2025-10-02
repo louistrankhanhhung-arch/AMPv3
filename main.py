@@ -31,7 +31,6 @@ from evidence_evaluators import build_evidence_bundle, Config, _reversal_signal
 from notifier_telegram import TelegramNotifier
 from storage import SignalPerfDB, JsonStore, UserDB
 from templates import render_update, render_teaser
-from fb_notifier import FBNotifier
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 TIMEFRAMES = ("5m", "15m", "1H", "4H", "1D")
