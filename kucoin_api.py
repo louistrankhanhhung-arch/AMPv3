@@ -5,7 +5,7 @@
 # - Clean DataFrame conversion
 # - Retry/backoff
 # - Deep historical pagination
-# - Partial-bar drop is applied ONLY for 1H timeframe (per requirement)
+# - Partial-bar drop is applied for 15m & 1H timeframes (execution safety)
 
 from __future__ import annotations
 
@@ -200,7 +200,7 @@ def fetch_ohlcv(
             raw = _ex.fetch_ohlcv(sym, timeframe=tf_str, since=since_ms, limit=limit)
             df = _to_dataframe(raw)
             # chỉ cắt nến chưa đóng nếu là timeframe 1H (và cờ drop_partial bật)
-            if drop_partial and timeframe.upper() == "1H" and not df.empty:
+            if drop_partial and timeframe.upper() in ("15M","1H") and not df.empty:
                 df = _drop_partial_bar(df, _bar_ms(_ex, tf_str))
             return df
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout) as e:
@@ -244,7 +244,7 @@ def fetch_ohlcv_history(
     None, it will page backwards from 'now' until max_pages (if set) or until no
     more data is returned.
 
-    Partial-bar dropping at the end is applied ONLY for 1H timeframe if requested.
+    Partial-bar dropping at the end is applied for 15m & 1H timeframes if requested.
     """
     tf_str = _ccxt_timeframe_str(timeframe)
     ex = _exchange(
@@ -309,7 +309,7 @@ def fetch_ohlcv_history(
     if end_ms is not None:
         out = out[out.index <= pd.to_datetime(end_ms, unit="ms", utc=True)]
 
-    # Only drop partial bar for 1H timeframe
+    # Only drop partial bar for 15m & 1H timeframes
     if drop_partial and tf_str == "1h" and not out.empty:
         out = _drop_partial_bar(out, bar_ms)
 
@@ -334,8 +334,8 @@ def fetch_batch(
 
     out: Dict[str, pd.DataFrame] = {}
     for tf in timeframes:
-        # Apply partial-bar drop only for 1H
-        partial_flag = drop_partial and (tf.upper() == "1H")
+        # Apply partial-bar drop for 15m & 1H
+        partial_flag = drop_partial and (tf.upper() in ("15M","1H"))
         out[tf] = fetch_ohlcv(
             sym, timeframe=tf, limit=limit, since_ms=since_ms,
             kucoin_key=kucoin_key, kucoin_secret=kucoin_secret, kucoin_passphrase=kucoin_passphrase,
