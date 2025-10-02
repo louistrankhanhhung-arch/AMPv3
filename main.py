@@ -6,7 +6,7 @@ Main worker for Crypto Signal (Railway ready)
   block1 at :00 & :30, block2 at :05 & :35, block3 at :10 & :40,
   block4 at :15 & :45, block5 at :20 & :50, block6 at :25 & :55 (Asia/Ho_Chi_Minh)
 - Workflow per symbol:
-  1) fetch OHLCV for 1H/4H/1D (1H drop partial bar; 4H/1D keep realtime)
+  1) fetch OHLCV for 15m/1H/4H/1D (drop partial for 15m & 1H; 4H/1D keep realtime)
   2) enrich indicators (EMA/RSI/BB/ATR/volume, candle anatomy)
   3) compute features_by_tf (trend/momentum/volatility/SR + volume profile bands)
   4) build evidence bundle (STRUCT JSON)
@@ -34,7 +34,7 @@ from templates import render_update, render_teaser
 from fb_notifier import FBNotifier
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
-TIMEFRAMES = ("1H", "4H", "1D")
+TIMEFRAMES = ("5m", "15m", "1H", "4H", "1D")
 
 log = logging.getLogger("worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),
@@ -965,13 +965,16 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
         ex=ex                     # reuse shared exchange to avoid 429
     )
     t_fetch = time.time() - t0
+
+    df15 = dfs.get("15m")
+    l15 = 0 if df15 is None else len(df15.index)
     df1 = dfs.get("1H")
     df4 = dfs.get("4H")
     dfD = dfs.get("1D")
     l1 = 0 if df1 is None else len(df1.index)
     l4 = 0 if df4 is None else len(df4.index)
     lD = 0 if dfD is None else len(dfD.index)
-    log.debug(f"[{symbol}] fetched: 1H={l1}, 4H={l4}, 1D={lD} in {t_fetch:.2f}s")
+    log.debug(f"[{symbol}] fetched: 15m={l15}, 1H={l1}, 4H={l4}, 1D={lD} in {t_fetch:.2f}s")
 
     # enrich indicators → features_by_tf
     t1 = time.time()
@@ -989,6 +992,23 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
     # evidence bundle (STRUCT JSON)
     t3 = time.time()
     bundle = build_evidence_bundle(symbol, feats_by_tf, cfg)
+    # ---- Intraday augmentation: provide raw dfs and BTC/ETH market context ----
+    try:
+        # dfs for intraday core (already enriched above)
+        dfs_intraday = {"15m": dfs.get("15m"), "1H": dfs.get("1H"), "4H": dfs.get("4H")}
+        market_ctx = {}
+        for anchor in ("BTC/USDT","ETH/USDT"):
+            try:
+                mdfs = fetch_batch(ex, anchor, timeframes=("1H","4H"), limit=limit, drop_partial=True, sleep_between_tf=sleep_between_tf, ex=ex)
+                mdfs = _enrich_all(mdfs)
+                base = anchor.split("/")[0]
+                market_ctx[base] = {"1H": mdfs.get("1H"), "4H": mdfs.get("4H")}
+            except Exception:
+                continue
+        bundle.update({"dfs": dfs_intraday, "market": market_ctx})
+    except Exception:
+        pass
+      
     log.debug(f"[{symbol}] bundle done in {time.time()-t3:.2f}s")
 
     # decide on 4H as execution TF (1H trigger, 4H execution, 1D context)
