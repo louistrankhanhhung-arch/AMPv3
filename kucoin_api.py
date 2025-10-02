@@ -20,6 +20,8 @@ import ccxt  # type: ignore
 # Timeframe mapping (friendly -> ccxt)
 # ---------------------------------
 TIMEFRAME_MAP: Dict[str, str] = {
+    "5m": "5m",
+    "15m": "15m",
     "1H": "1h",
     "4H": "4h",
     "1D": "1d",
