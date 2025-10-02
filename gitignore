@@ -1,0 +1,10 @@
+# Secrets & local config
+.env
+
+# Runtime data
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
