@@ -902,19 +902,6 @@ def _get_notifier():
     return TN
 # --- end telegram notifier helper ---
 
-# --- Facebook Fanpage Notifier (init-once, lazy) ---
-FB = None
-def _get_fb_notifier():
-    global FB
-    if FB is None:
-        try:
-            FB = FBNotifier()
-        except Exception as e:
-            log.warning(f"FBNotifier init failed; disabled. reason={e}")
-            FB = False
-    return FB
-# --- end fb notifier helper ---
-
 def split_into_6_blocks(symbols: List[str]) -> List[List[str]]:
     """Stable split into 6 blocks: [s[0], s[6], ...], [s[1], s[7], ...], ..."""
     return [symbols[i::6] for i in range(6)]
@@ -1108,7 +1095,6 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
     # --- post teaser to Telegram Channel when ENTER ---
     if dec == "ENTER":
         tn = _get_notifier()
-        fb = _get_fb_notifier()
         try:
             plan_for_teaser = dict(plan or {})
             plan_for_teaser.update({
@@ -1184,19 +1170,6 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                     hl0_4h_hi=hi4, hl0_4h_lo=lo4,
                     hl0_1h_hi=hi1, hl0_1h_lo=lo1,
                 )
-                # 5) Đăng lên Fanpage (độc lập với Telegram)
-                try:
-                    if fb:
-                        html_teaser = render_teaser(plan_for_teaser)
-                        origin_url = None
-                        try:
-                            if msg_id and hasattr(tn, "_build_origin_link"):
-                                origin_url = tn._build_origin_link(int(msg_id))
-                        except Exception:
-                            origin_url = None
-                        fb.post_teaser(html_teaser, origin_url=origin_url)
-                except Exception as e:
-                    log.warning(f"[{symbol}] fanpage teaser failed: {e}")
         except Exception as e:
             log.warning(f"[{symbol}] ENTER flow failed: {e}")
                 
