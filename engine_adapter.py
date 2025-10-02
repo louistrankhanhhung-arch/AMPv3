@@ -207,13 +207,21 @@ def decide(symbol: str, timeframe: str, features_by_tf: Dict[str, Dict[str, Any]
     try:
         if _HAS_INTRADAY:
             dfs = (evidence_bundle or {}).get("dfs") or {}
+            # Fallback: nếu bundle chưa có dfs, thử lấy từ features_by_tf (nếu có lưu df tại đó)
+            if not dfs:
+                dfs = {
+                    "15m": (features_by_tf or {}).get("15m", {}).get("df"),
+                    "1H":  (features_by_tf or {}).get("1H",  {}).get("df"),
+                }
             df15 = dfs.get("15m")
-            if df15 is not None and getattr(df15, "empty", False) is False:
+            if df15 is not None and getattr(df15, "empty", True) is False:
                 icfg = IntradayCfg()
-                out = decide_intraday(evidence_bundle, icfg) or {}
+                out = decide_intraday({**(evidence_bundle or {}), "dfs": dfs}, icfg) or {}
+                # Nếu intraday ra quyết định hợp lệ thì dùng luôn, không cần tiny-core
                 if out.get("decision"):
                     return out
     except Exception:
+        # bất kỳ lỗi nào ở nhánh intraday -> bỏ qua, fallback tiny core
         pass
 
     # evidence_bundle expected to include 'evidence' object; pass through as eb-like
