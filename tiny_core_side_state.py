@@ -992,6 +992,10 @@ def decide_5_gates(state: str, side: Optional[str], setup: Setup, si: SI, cfg: S
         missing_tags.append("near_heavy_zone")
     if setup.entry is None or setup.sl is None:
         missing_tags.append("incomplete_setup")
+        # coi là lý do chặn thật sự, không chỉ là tag hiển thị
+        # để tránh DECISION=ENTER khi thiếu setup
+        if "incomplete_setup" not in reasons:
+            reasons.append("incomplete_setup")
     if _safe_get(si, "price") is None:
         missing_tags.append("no_price")
     if float(_safe_get(si, "atr", 0.0) or 0.0) <= 0:
@@ -1003,6 +1007,8 @@ def decide_5_gates(state: str, side: Optional[str], setup: Setup, si: SI, cfg: S
             missing_tags.append(r)
     dec.meta["missing_tags"] = sorted(set(missing_tags))
     # Tổng hợp quyết định
+    # Lưu ý: nếu còn thiếu setup/side/price/atr... thì reasons đã có ghi nhận
+    # nên sẽ rơi vào WAIT.
     if not reasons:
         dec.decision = "ENTER"
     else:
