@@ -8,6 +8,13 @@ from tiny_core_side_state import SideCfg, run_side_state_core
 import os
 from evidence_evaluators import _reversal_signal
 
+try:
+    # Intraday path (15m)
+    from intraday_core import decide_intraday, IntradayCfg
+    _HAS_INTRADAY = True
+except Exception:
+    _HAS_INTRADAY = False
+
 def _last_closed_bar(df):
     """
     Return the last *closed* bar for streaming safety:
@@ -196,6 +203,19 @@ def _leverage_hint(side: Optional[str], entry: Optional[float], sl: Optional[flo
         return None
 
 def decide(symbol: str, timeframe: str, features_by_tf: Dict[str, Dict[str, Any]], evidence_bundle: Dict[str, Any]) -> Dict[str, Any]:
+    # ---- Intraday routing (15m execution) ----
+    try:
+        if _HAS_INTRADAY:
+            dfs = (evidence_bundle or {}).get("dfs") or {}
+            df15 = dfs.get("15m")
+            if df15 is not None and getattr(df15, "empty", False) is False:
+                icfg = IntradayCfg()
+                out = decide_intraday(evidence_bundle, icfg) or {}
+                if out.get("decision"):
+                    return out
+    except Exception:
+        pass
+
     # evidence_bundle expected to include 'evidence' object; pass through as eb-like
     eb = evidence_bundle.get("evidence") or evidence_bundle  # tolerate both shapes
     cfg = SideCfg()
