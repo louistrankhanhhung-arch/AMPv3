@@ -69,6 +69,7 @@ from typing import Dict, Any, Optional, Tuple
 import math
 import numpy as np
 import pandas as pd
+import datetime as _dt
 
 # --- light EMA helpers (avoid tight coupling) -------------------------------
 def _ema(series: pd.Series, span: int) -> pd.Series:
@@ -109,6 +110,20 @@ class IntradayCfg:
     default_lev: float = 3.0
 
 # ----------------------- utilities -----------------------------------------
+_CORE_ORIGIN = "intraday_core"
+_CORE_VER    = "2025-10-02"
+
+def _with_origin(d: dict) -> dict:
+    try:
+        out = dict(d or {})
+        out.setdefault("origin", _CORE_ORIGIN)
+        out.setdefault("core_ver", _CORE_VER)
+        # gợi ý thêm: nhúng state/direction nếu có để main dễ log
+        if "STATE" in out and "DIRECTION" in out:
+            out.setdefault("notes", [])
+        return out
+    except Exception:
+        return d
 
 def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -365,8 +380,8 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
     df1h = _ensure_cols(dfs.get("1H")) if dfs.get("1H") is not None else None
     df4h = _ensure_cols(dfs.get("4H")) if dfs.get("4H") is not None else None
 
-    if df15 is None or df1h is None:
-        return {"decision": "AVOID", "symbol": sym, "why": "missing 15m/1H data"}
+    if df1h is None or df15 is None or len(df1h) == 0 or len(df15) == 0:
+        return _with_origin({"decision": "AVOID", "symbol": sym, "why": "missing 15m/1H data"})
 
     notes = []
 
@@ -394,23 +409,23 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
                     notes.append(f"C: mean-revert to {which_ma}")
 
     if not ok or direction is None:
-        return {"decision": "WAIT", "symbol": sym, "why": "no form matched"}
-
+        return _with_origin({"decision": "WAIT", "symbol": sym, "why": "no form matched"})
+      
     # 2) guards
     # 2a) market guard
     g_block, g_why = _guard_market(bundle, direction, cfg)
     if g_block:
-        return {"decision": "WAIT", "symbol": sym, "why": g_why}
+        return _with_origin({"decision": "WAIT", "symbol": sym, "why": g_why})
 
     # 2b) liquidity guard
     l_block, l_why = _guard_liquidity(bundle, cfg)
     if l_block:
-        return {"decision": "AVOID", "symbol": sym, "why": l_why}
+        return _with_origin({"decision": "AVOID", "symbol": sym, "why": l_why})
 
     # 2c) regime (NATR) guard
     r_block, r_why = _guard_regime(df15, state, cfg)
     if r_block:
-        return {"decision": "WAIT", "symbol": sym, "why": r_why}
+        return _with_origin({"decision": "WAIT", "symbol": sym, "why": r_why})
 
     # 3) build setup (entry/SL)
     last15 = _last_closed(df15)
@@ -480,8 +495,7 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
             "sl_to_tp2_after_tp3": True,
         },
     }
-    return plan
-
+    return _with_origin(plan)
 
 # Convenience alias used by external engine
 class IntradayCore:
