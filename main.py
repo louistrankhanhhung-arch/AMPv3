@@ -1055,12 +1055,15 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
         rr_str = " ".join(rr_parts)
         extra = (" " + lev_part) if lev_part else ""
 
+        _core = (out.get("origin") or plan.get("origin") or "").strip() if isinstance(out, dict) else ""
+        _core_ver = (out.get("core_ver") or "").strip() if isinstance(out, dict) else ""
+        _core_tag = f" [CORE:{_core}@{_core_ver}]" if _core else ""
         log.info(
             f"[{symbol}] DECISION={dec} | STATE={state} | "
             f"DIR={str(dir_val).upper()} | "
             f"entry={plan.get('entry')} entry2={plan.get('entry2')} "
             f"sl={plan.get('sl')} "
-            f"{(tp_str + ' ' + rr_str).strip()}{extra}".strip()
+            f"{(tp_str + ' ' + rr_str).strip()}{extra}{_core_tag}".strip()
         )
     if dec == "WAIT":
         # --- WAIT branch logging (detail) ---
