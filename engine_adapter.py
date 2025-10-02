@@ -219,6 +219,10 @@ def decide(symbol: str, timeframe: str, features_by_tf: Dict[str, Dict[str, Any]
                 out = decide_intraday({**(evidence_bundle or {}), "dfs": dfs}, icfg) or {}
                 # Nếu intraday ra quyết định hợp lệ thì dùng luôn, không cần tiny-core
                 if out.get("decision"):
+                    try:
+                        out.setdefault("origin", "intraday_core")
+                    except Exception:
+                        pass
                     return out
     except Exception:
         # bất kỳ lỗi nào ở nhánh intraday -> bỏ qua, fallback tiny core
