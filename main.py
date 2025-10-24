@@ -6,7 +6,7 @@ Main worker for Crypto Signal (Railway ready)
   block1 at :00 & :30, block2 at :05 & :35, block3 at :10 & :40,
   block4 at :15 & :45, block5 at :20 & :50, block6 at :25 & :55 (Asia/Ho_Chi_Minh)
 - Workflow per symbol:
-  1) fetch OHLCV for 15m/1H/4H/1D (drop partial for 15m & 1H; 4H/1D keep realtime)
+  1) fetch OHLCV for 1H/4H/1D (1H drop partial bar; 4H/1D keep realtime)
   2) enrich indicators (EMA/RSI/BB/ATR/volume, candle anatomy)
   3) compute features_by_tf (trend/momentum/volatility/SR + volume profile bands)
   4) build evidence bundle (STRUCT JSON)
@@ -22,7 +22,7 @@ import pandas as pd
 import requests
 
 from universe import get_universe_from_env  # uses DEFAULT_UNIVERSE if SYMBOLS not set
-from kucoin_api import fetch_batch, _exchange  # spot-only; 15m/1H drop-partial
+from kucoin_api import fetch_batch, _exchange  # spot-only; 1H drop-partial
 from indicators import enrich_indicators, enrich_more
 from feature_primitives import compute_features_by_tf
 from engine_adapter import decide
@@ -31,10 +31,54 @@ from evidence_evaluators import build_evidence_bundle, Config, _reversal_signal
 from notifier_telegram import TelegramNotifier
 from storage import SignalPerfDB, JsonStore, UserDB
 from templates import render_update, render_teaser
+from fb_notifier import FBNotifier
+
+# ============================================================
+# FREE FULL SIGNAL (đăng 1 lệnh đầu tiên sau 7:00 sáng mỗi ngày)
+# ============================================================
+from datetime import date
+
+def _should_post_free_signal_today(store: "JsonStore") -> bool:
+    """
+    Kiểm tra hôm nay đã có Free Full Signal chưa.
+    Nếu chưa, lưu dấu và trả True.
+    """
+    data = store.read("free_signal_state") or {}
+    today_str = str(date.today())
+    if data.get("last_post_date") == today_str:
+        return False
+    data["last_post_date"] = today_str
+    store.write("free_signal_state", data)
+    return True
+
+def _try_post_free_signal_if_first_today(plan: dict):
+    """
+    Mỗi ngày chỉ post 1 lệnh free đầu tiên sau 7:00 sáng.
+    """
+    try:
+        now = datetime.now(TZ)
+        if now.hour < 7:
+            return
+        store = JsonStore(os.getenv("DATA_DIR","./data"))
+        if not _should_post_free_signal_today(store):
+            return
+        tn = _get_notifier()
+        fb = _get_fb_notifier()
+        from templates import render_full
+        html = render_full(plan)
+        msg = f"🎁 <b>AMP - Free Full Signal hôm nay</b>\n\n{html}"
+        if tn:
+            tn.send_channel(msg)
+        if fb:
+            fb.post_text(msg)
+        log.info(f"[FreeSignal] Posted free full signal for {plan.get('symbol')}")
+    except Exception as e:
+        log.warning(f"[FreeSignal] failed: {e}")
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
-# Bổ sung intraday 5m/15m vào vòng fetch để intraday_core có dữ liệu
-TIMEFRAMES = ("5m", "15m", "1H", "4H", "1D")
+# Intraday-first: 15M + 1H (exec) + 4H (context/confirm). Bỏ 1D khỏi vòng quét thường xuyên để nhẹ tải.
+# Có thể bật lại 1D qua ENV: INCLUDE_1D=1 nếu cần background bias.
+TIMEFRAMES = ("15M", "1H", "4H") if os.getenv("INCLUDE_1D","0")!="1" else ("15M","1H","4H","1D")
 
 log = logging.getLogger("worker")
 logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),
@@ -57,12 +101,108 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 MAX_OPEN_PER_SIDE = _env_int("MAX_OPEN_PER_SIDE", 4)         # không tính lệnh đã TP1
-MAX_RISK_EXPOSURE_R = _env_float("MAX_RISK_EXPOSURE_R", 4.0) # tổng R đang treo
+MAX_OPEN_TOTAL     = _env_int("MAX_OPEN_TOTAL", 8)           # tổng số lệnh OPEN chưa TP
+MAX_RISK_EXPOSURE_R = _env_float("MAX_RISK_EXPOSURE_R", 8.0) # tổng R đang treo
 DD_60M_CAP = _env_float("DD_60M_CAP", -1.5)                   # R
 LOSING_STREAK_N = _env_int("LOSING_STREAK_N", 3)              # 3 SL liên tiếp
 COOLDOWN_2H = 2 * 3600
 COOLDOWN_3H = 3 * 3600
 MAX_PER_TRADE_R = _env_float("MAX_PER_TRADE_R", 2.0)          # trần R mỗi lệnh để chống dữ liệu lỗi
+
+# ---- Notional guards (theo tỷ lệ trên vốn E) --------------------------------
+# Tổng notional/E cho toàn danh mục và theo side
+CAP_NOTIONAL_TOTAL_E = _env_float("CAP_NOTIONAL_TOTAL_E", 2.0)     # GrossNotional_total ≤ 2.0E
+CAP_NOTIONAL_SIDE_E  = _env_float("CAP_NOTIONAL_SIDE_E",  0.75)    # GrossNotional_side  ≤ 0.75E
+# Ước lượng mức risk mỗi lệnh theo % vốn (nếu không có size cụ thể)
+RISK_PCT_PER_TRADE   = _env_float("RISK_PCT_PER_TRADE", 0.005)     # =0.5% vốn mặc định
+# Leverage mặc định khi record không nêu rõ
+REPORT_LEVERAGE_DEF  = _env_float("REPORT_LEVERAGE", 2.0)
+
+def _move_pct_to_sl(t: dict) -> float:
+    """% move tới SL theo spot (0..1). Trả 0 nếu thiếu dữ liệu."""
+    try:
+        e = float(t.get("entry") or 0.0)
+        s = float(t.get("sl") or 0.0)
+        if not e or not s:
+            return 0.0
+        return abs(e - s) / e
+    except Exception:
+        return 0.0
+
+def _effective_leverage_for_item_local(t: dict) -> float:
+    """
+    Leverage hiệu dụng ưu tiên từ record (risk_size_hint/leverage/lev),
+    fallback ENV REPORT_LEVERAGE.
+    """
+    for k in ("leverage", "lev", "risk_size_hint"):
+        try:
+            v = float(t.get(k))
+            if v and v > 0:
+                return v
+        except Exception:
+            pass
+    return float(REPORT_LEVERAGE_DEF)
+
+def _notional_ratio_contrib(t: dict) -> float:
+    """
+    Ứơc lượng S/E cho một lệnh đang mở chưa TP:
+      S/E ≈ RISK_PCT_PER_TRADE * leverage / move_pct * risk_fraction
+    Trong đó risk_fraction lấy từ risk_R_remaining (≤1), fallback 1.0.
+    """
+    try:
+        move_pct = _move_pct_to_sl(t)
+        if move_pct <= 0:
+            return 0.0
+        lev = _effective_leverage_for_item_local(t)
+        rf = t.get("risk_R_remaining")
+        if rf is None: rf = t.get("risk_R")
+        if rf is None: rf = t.get("R")
+        try:
+            rf = float(rf)
+        except Exception:
+            rf = 1.0
+        # chặn rf trong [0,1] để tránh ghi dữ liệu lỗi
+        if not (rf == rf) or rf <= 0:
+            rf = 0.0
+        elif rf > 1.0:
+            rf = 1.0
+        return float(RISK_PCT_PER_TRADE) * float(lev) / float(move_pct) * float(rf)
+    except Exception:
+        return 0.0
+
+def _notional_ratio_caps(perf: "SignalPerfDB") -> tuple[float, dict[str,float], list[tuple[str,str,float]]]:
+    """
+    Tính tổng S/E và S/E theo side cho các lệnh OPEN chưa từng chạm TP.
+    Trả về: (total_ratio, per_side_dict, top_contrib_list)
+    """
+    tot = 0.0
+    per_side = {"LONG": 0.0, "SHORT": 0.0}
+    contrib = []  # [(symbol, side, ratio)]
+    try:
+        opens = perf.list_open_status()
+        for it in opens or []:
+            st = (it.get("status") or it.get("STATUS") or "").upper()
+            if st != "OPEN":
+                continue
+            # bỏ qua lệnh đã từng chạm TP
+            if _has_any_tp_hit(it):
+                continue
+            side = (it.get("side") or it.get("DIRECTION") or "").upper()
+            if side not in ("LONG","SHORT"):
+                continue
+            r = _notional_ratio_contrib(it)
+            if r <= 0:
+                continue
+            tot += r
+            per_side[side] = per_side.get(side, 0.0) + r
+            if len(contrib) < 24:
+                sym = it.get("symbol") or it.get("SYMBOL") or "?"
+                contrib.append((str(sym), side, float(r)))
+    except Exception as e:
+        log.warning(f"notional_ratio_caps fallback due to {e}")
+    # sort top contributors để debug khi chặn
+    contrib = sorted(contrib, key=lambda x: x[2], reverse=True)[:6]
+    return float(tot), per_side, contrib
 
 # Cụm beta cao (đơn giản, có thể tinh chỉnh sau). So khớp theo BASE (trước "/USDT")
 _CLUSTERS = [
@@ -130,6 +270,33 @@ def _has_any_tp_hit(it: dict) -> bool:
         pass
     return False
 
+# ---------- BE Turbo thresholds for 1H-ladder profile ----------
+_BE_LADDER_PROFILE = {
+    # profile -> (hit_fract_for_BE, time_exit_n_4h_bars, time_exit_min_R_progress)
+    "1H-ladder": (0.55, 3, 0.30),
+}
+
+def _profile_params(profile: str, regime: str) -> tuple[float, int, float]:
+    """
+    Trả về bộ tham số (be_hit, time_n_bars, min_prog_R).
+    - Ưu tiên theo profile trong _BE_LADDER_PROFILE (nếu có).
+    - Nếu không có profile phù hợp, fallback theo regime:
+        LOW    → be_hit=0.60, time_n_bars=3, min_prog_R=0.30
+        NORMAL → be_hit=0.80, time_n_bars=3, min_prog_R=0.30
+        HIGH   → tắt BE turbo/time-exit (trả tham số None) — caller tự quyết.
+    """
+    p = (profile or "").strip()
+    r = (regime or "normal").lower()
+    if p in _BE_LADDER_PROFILE:
+        bh, nbar, minp = _BE_LADDER_PROFILE[p]
+        return float(bh), int(nbar), float(minp)
+    if r == "low":
+        return 0.60, 3, 0.30
+    if r == "normal":
+        return 0.80, 3, 0.30
+    # high-vol → không khuyến khích auto BE/time-exit
+    return float("nan"), 0, float("nan")
+
 def _count_open_by_side(perf: "SignalPerfDB") -> dict:
     """Đếm số lệnh đang OPEN theo side, **chỉ** tính lệnh CHƯA có TP nào."""
     res = {"LONG":0, "SHORT":0}
@@ -149,6 +316,21 @@ def _count_open_by_side(perf: "SignalPerfDB") -> dict:
     except Exception as e:
         log.warning(f"count_open_by_side fallback due to {e}")
     return res
+
+def _count_open_total(perf: "SignalPerfDB") -> int:
+    """Tổng số lệnh đang OPEN, loại trừ mọi lệnh đã có TP."""
+    try:
+        n = 0
+        for it in perf.list_open_status() or []:
+            st = (it.get("status") or it.get("STATUS") or "").upper()
+            if st != "OPEN":
+                continue
+            if _has_any_tp_hit(it):
+                continue
+            n += 1
+        return n
+    except Exception:
+        return 0
 
 def _total_risk_exposure_R(perf: "SignalPerfDB") -> float:
     """
@@ -430,6 +612,29 @@ def _unrealized_R(trade: dict, px: float) -> float:
     except Exception:
         return 0.0
 
+def _remaining_weight(trade: dict) -> float:
+    """
+    Phần trọng số còn lại của vị thế (1 - tổng weight các TP đã hit).
+    - Ưu tiên 'weights' do storage lưu khi mở lệnh (map: tp1..tp5)
+    - Nếu thiếu thì fallback 0.0 (tức coi như không còn vị thế — bảo thủ)
+    """
+    try:
+        w = (trade.get("weights") or trade.get("scale_out_weights") or {}) if isinstance(trade, dict) else {}
+        hits = (trade.get("hits") or {}) if isinstance(trade, dict) else {}
+        hit_sum = 0.0
+        for lv in ("TP1","TP2","TP3","TP4","TP5"):
+            if hits.get(lv):
+                try:
+                    hit_sum += float(w.get(lv.lower(), 0.0))
+                except Exception:
+                    pass
+        rem = 1.0 - hit_sum
+        if rem < 0.0: rem = 0.0
+        if rem > 1.0: rem = 1.0
+        return float(rem)
+    except Exception:
+        return 0.0
+
 def _mfe_R_since_open(df4: pd.DataFrame, trade: dict) -> float:
     """
     MFE tính theo 4H kể từ nến *đóng* gần thời điểm post lệnh.
@@ -557,8 +762,8 @@ def _time_exit_and_breakeven_checks(symbol: str,
     Thực thi 2 cơ chế:
     1) Time-based exit khi LOW/NORMAL:
        - Sau >=3 nến 4H kể từ open mà MFE_R < +0.3R ⇒ CLOSE sớm (cap −0.2R).
-    2) Breakeven turbo khi LOW/NORMAL:
-       - Chưa TP1; nếu R_now ≥ 0.6R (low) hoặc 0.8R (normal) ⇒ dời SL về Entry (sl_dyn=entry).
+    2) Breakeven turbo TẤT CẢ regime:
+       - Chưa TP1; nếu R_now ≥ 0.2R ⇒ dời SL về Entry (sl_dyn=entry).
     Gửi thông báo qua Telegram bằng format chung.
     """
     try:
@@ -572,14 +777,18 @@ def _time_exit_and_breakeven_checks(symbol: str,
         open_trades = perfdb.by_symbol(symbol)
         for t in open_trades:
             status = (t.get("status") or "OPEN").upper()
+            # lấy profile nếu có (ưu tiên trường đã lưu trong DB khi ENTER)
+            profile = str(t.get("profile") or t.get("meta_profile") or t.get("ladder_profile") or "").strip()
+            be_hit, time_n_bars_default, min_prog_default = _profile_params(profile, reg)
             # -------- Breakeven Turbo (áp dụng khi chưa TP1) --------
             if status == "OPEN":
                 R_now = _unrealized_R(t, price_now)
-                thr = 0.6 if reg == "low" else 0.8
+                # BE turbo bất kể regime (có thể chỉnh qua ENV BE_TURBO_R; mặc định 0.2)
+                thr = float(os.getenv("BE_TURBO_R", "0.2"))
                 be_flag = bool(t.get("breakeven_turbo"))
                 # chống trùng lặp: đã từng gửi thông báo BE cho lệnh này?
                 be_notified = bool(t.get("be_notify_ts"))
-                if (R_now >= thr) and (not be_flag) and (not be_notified):
+                if (thr is not None) and (R_now >= float(thr)) and (not be_flag) and (not be_notified):
                     # dời SL động về Entry, đánh dấu đã kích hoạt BE và lưu mốc trigger để theo dõi stall-fail
                     now_ts = int(time.time())
                     upd = perfdb.update_fields(
@@ -587,15 +796,16 @@ def _time_exit_and_breakeven_checks(symbol: str,
                         sl_dyn=float(t.get("entry")),
                         breakeven_turbo=True,
                         be_notify_ts=now_ts,           # chống trùng lặp thông báo BE
-                        be_trigger_ts=now_ts,          # mốc kích hoạt 0.6R/0.8R
-                        be_peak_R=float(R_now)         # peak R kể từ trigger
+                        be_trigger_ts=now_ts,          # mốc kích hoạt BE_TURBO_R (mặc định 0.3R)
+                        be_peak_R=float(R_now),        # peak R kể từ trigger
+                        meta_profile=profile or None   # lưu lại (ổn định ở DB)
                     )
                     # notify (một lần duy nhất)
                     mid = int(upd.get("message_id") or 0)
                     if tn and mid:
                         html = render_update(
                             {"symbol": t.get("symbol"), "DIRECTION": t.get("dir")},
-                            event="Dời SL về Entry.",
+                            event="📌 Dời SL về Entry giữ an toàn vốn.",
                             extra=None
                         )
                         tn.send_channel_update(mid, html)
@@ -606,15 +816,16 @@ def _time_exit_and_breakeven_checks(symbol: str,
                 has_tp1 = bool(hits.get("TP1"))
                 trig_ts = int(t.get("be_trigger_ts") or 0)
                 if (status == "OPEN") and (trig_ts > 0) and (not has_tp1):
-                    # Cửa sổ quan sát: LOW=2 nến 4H, NORMAL=3 nến 4H
-                    window_n = 2 if reg == "low" else 3
+                    # Cửa sổ quan sát theo profile/regime
+                    window_n = 2 if (profile and profile in _BE_LADDER_PROFILE and reg == "low") else time_n_bars_default
                     bars = _bars_4h_since_ts(df4, trig_ts)
                     if bars >= window_n:
                         # A) Progress test: MFE kể từ trigger không tăng đủ
-                        #    progress = MFE_since_trigger - threshold_at_trigger
-                        thr_prog = 0.15 if reg == "low" else 0.20
+                        #    progress = MFE_since_trigger - threshold_at_trigger(=be_hit)
+                        thr_prog = 0.15 if (profile and profile in _BE_LADDER_PROFILE and reg == "low") else min_prog_default
                         mfe_trig = _mfe_R_since_ts(df4, t, trig_ts)
-                        progress = max(0.0, float(mfe_trig - thr))
+                        base_thr = float(thr) if (thr is not None) else 0.0
+                        progress = max(0.0, float(mfe_trig - base_thr))
                         # Khoảng cách còn lại tới TP1 tính theo R (nếu có TP1)
                         try:
                             entry = float(t.get("entry") or 0.0)
@@ -655,10 +866,21 @@ def _time_exit_and_breakeven_checks(symbol: str,
 
                         # QUY TẮC: CLOSE nếu A & (B hoặc REVERSAL)
                         if progress_ok and (give_ok or is_rev):
-                            # Tính R_now và ghi KPI weighted 20%
+                            # Tính R_now và ghi KPI theo phần trọng số còn lại (scale-out động)
                             R_cap = R_now  # không cap cứng trong stall-fail
-                            new_R = float(t.get("realized_R") or 0.0) + 0.2 * R_cap
-                            perfdb.update_fields(t["sid"], realized_R=new_R)
+                            rem_w = _remaining_weight(t)
+                            new_R = float(t.get("realized_R") or 0.0) + rem_w * R_cap
+                            # cập nhật close_px/close_pct để KPI % chuẩn
+                            try:
+                                entry = float(t.get("entry") or 0.0)
+                                side  = (t.get("dir") or "").upper()
+                                def _pct(entry_px: float, px: float, _side: str) -> float:
+                                    if not entry_px or not px: return 0.0
+                                    return ((px - entry_px) / entry_px * 100.0) if _side=="LONG" else ((entry_px - px) / entry_px * 100.0)
+                                close_pct = _pct(entry, float(price_now), side)
+                            except Exception:
+                                close_pct = 0.0
+                            perfdb.update_fields(t["sid"], realized_R=new_R, close_px=float(price_now), close_pct=float(close_pct))
                             perfdb.close(t["sid"], reason="STALL_FAIL_AFTER_TRIGGER")
                             # notify
                             mid = int((t.get("message_id") or 0))
@@ -670,16 +892,29 @@ def _time_exit_and_breakeven_checks(symbol: str,
                             if tn and mid:
                                 tn.send_channel_update(mid, html)
 
-            # -------- Time-based exit 3 x 4H (< +0.3R) --------
+            # -------- Time-based exit (profile-aware) --------
             bars = _bars_4h_since_open(df4, t)
-            if bars >= 3:
+            te_n = time_n_bars_default
+            te_min_prog = min_prog_default
+            if (te_n > 0) and (bars >= int(te_n)):
                 mfeR = _mfe_R_since_open(df4, t)
-                if mfeR < 0.3:
-                    # Tính R ở giá hiện tại và cap −0.2R (weighted 20%)
+                if mfeR < float(te_min_prog):
+                    # Tính R ở giá hiện tại; phần còn lại theo rem_w. Cho phép cap lỗ ở -0.2R nếu muốn (tắt cap mặc định).
                     R_now = _unrealized_R(t, price_now)
-                    R_cap = max(R_now, -0.2)
-                    new_R = float(t.get("realized_R") or 0.0) + 0.2 * R_cap
-                    perfdb.update_fields(t["sid"], realized_R=new_R)
+                    R_cap = R_now  # nếu muốn cap: max(R_now, -0.2)
+                    rem_w = _remaining_weight(t)
+                    new_R = float(t.get("realized_R") or 0.0) + rem_w * R_cap
+                    # cập nhật close_px/close_pct để KPI % chuẩn
+                    try:
+                        entry = float(t.get("entry") or 0.0)
+                        side  = (t.get("dir") or "").upper()
+                        def _pct(entry_px: float, px: float, _side: str) -> float:
+                            if not entry_px or not px: return 0.0
+                            return ((px - entry_px) / entry_px * 100.0) if _side=="LONG" else ((entry_px - px) / entry_px * 100.0)
+                        close_pct = _pct(entry, float(price_now), side)
+                    except Exception:
+                        close_pct = 0.0
+                    perfdb.update_fields(t["sid"], realized_R=new_R, close_px=float(price_now), close_pct=float(close_pct))
                     perfdb.close(t["sid"], reason="TIME_EXIT")
                     # notify
                     mid = int((t.get("message_id") or 0))
@@ -902,6 +1137,19 @@ def _get_notifier():
     return TN
 # --- end telegram notifier helper ---
 
+# --- Facebook Fanpage Notifier (init-once, lazy) ---
+FB = None
+def _get_fb_notifier():
+    global FB
+    if FB is None:
+        try:
+            FB = FBNotifier()
+        except Exception as e:
+            log.warning(f"FBNotifier init failed; disabled. reason={e}")
+            FB = False
+    return FB
+# --- end fb notifier helper ---
+
 def split_into_6_blocks(symbols: List[str]) -> List[List[str]]:
     """Stable split into 6 blocks: [s[0], s[6], ...], [s[1], s[7], ...], ..."""
     return [symbols[i::6] for i in range(6)]
@@ -952,16 +1200,13 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
         ex=ex                     # reuse shared exchange to avoid 429
     )
     t_fetch = time.time() - t0
-
-    df15 = dfs.get("15m")
-    l15 = 0 if df15 is None else len(df15.index)
     df1 = dfs.get("1H")
     df4 = dfs.get("4H")
     dfD = dfs.get("1D")
     l1 = 0 if df1 is None else len(df1.index)
     l4 = 0 if df4 is None else len(df4.index)
     lD = 0 if dfD is None else len(dfD.index)
-    log.debug(f"[{symbol}] fetched: 15m={l15}, 1H={l1}, 4H={l4}, 1D={lD} in {t_fetch:.2f}s")
+    log.debug(f"[{symbol}] fetched: 1H={l1}, 4H={l4}, 1D={lD} in {t_fetch:.2f}s")
 
     # enrich indicators → features_by_tf
     t1 = time.time()
@@ -979,23 +1224,6 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
     # evidence bundle (STRUCT JSON)
     t3 = time.time()
     bundle = build_evidence_bundle(symbol, feats_by_tf, cfg)
-    # ---- Intraday augmentation: provide raw dfs and BTC/ETH market context ----
-    try:
-        # dfs for intraday core (already enriched above)
-        dfs_intraday = {"15m": dfs.get("15m"), "1H": dfs.get("1H"), "4H": dfs.get("4H")}
-        market_ctx = {}
-        for anchor in ("BTC/USDT","ETH/USDT"):
-            try:
-                mdfs = fetch_batch(ex, anchor, timeframes=("1H","4H"), limit=limit, drop_partial=True, sleep_between_tf=sleep_between_tf, ex=ex)
-                mdfs = _enrich_all(mdfs)
-                base = anchor.split("/")[0]
-                market_ctx[base] = {"1H": mdfs.get("1H"), "4H": mdfs.get("4H")}
-            except Exception:
-                continue
-        bundle.update({"dfs": dfs_intraday, "market": market_ctx})
-    except Exception:
-        pass
-      
     log.debug(f"[{symbol}] bundle done in {time.time()-t3:.2f}s")
 
     # decide on 4H as execution TF (1H trigger, 4H execution, 1D context)
@@ -1055,15 +1283,12 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
         rr_str = " ".join(rr_parts)
         extra = (" " + lev_part) if lev_part else ""
 
-        _core = (out.get("origin") or plan.get("origin") or "").strip() if isinstance(out, dict) else ""
-        _core_ver = (out.get("core_ver") or "").strip() if isinstance(out, dict) else ""
-        _core_tag = f" [CORE:{_core}@{_core_ver}]" if _core else ""
         log.info(
             f"[{symbol}] DECISION={dec} | STATE={state} | "
             f"DIR={str(dir_val).upper()} | "
             f"entry={plan.get('entry')} entry2={plan.get('entry2')} "
             f"sl={plan.get('sl')} "
-            f"{(tp_str + ' ' + rr_str).strip()}{extra}{_core_tag}".strip()
+            f"{(tp_str + ' ' + rr_str).strip()}{extra}".strip()
         )
     if dec == "WAIT":
         # --- WAIT branch logging (detail) ---
@@ -1098,6 +1323,7 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
     # --- post teaser to Telegram Channel when ENTER ---
     if dec == "ENTER":
         tn = _get_notifier()
+        fb = _get_fb_notifier()
         try:
             plan_for_teaser = dict(plan or {})
             plan_for_teaser.update({
@@ -1105,6 +1331,15 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                 "DIRECTION": (plan.get("direction") or plan.get("dir") or "-").upper() if isinstance(plan, dict) else "-",
                 "STATE": state,
                 "notes": out.get("notes", []),
+                "STRATEGY": out.get("strategy"),
+                # lưu profile để BE/time-exit tra cứu về sau
+                "profile": (
+                    (out.get("meta") or {}).get("profile")
+                    or (plan.get("profile") if isinstance(plan, dict) else None)
+                    or ("1H-ladder" if (isinstance(plan, dict) and plan.get("ladder_tf") == "1H") else None)
+                ),
+                "scale_out_weights": (out.get("meta") or {}).get("scale_out_weights"),
+                "tp0_weight": (out.get("meta") or {}).get("tp0_weight"),
             })
             perf = SignalPerfDB(JsonStore(os.getenv("DATA_DIR","./data")))
             # 0) Block by market-side cooldown (Early Flip Guard)
@@ -1119,6 +1354,10 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
             # 0.1) Pre-entry guards — đếm lệnh/ R đang treo / tương quan-beta
             try:
                 counts = _count_open_by_side(perf)
+                total_open = _count_open_total(perf)
+                if total_open >= MAX_OPEN_TOTAL:
+                    log.info(f"[{symbol}] skip ENTER: MAX_OPEN_TOTAL reached ({total_open} ≥ {MAX_OPEN_TOTAL})")
+                    return
                 side_up = (plan_for_teaser.get("DIRECTION") or "").upper()
                 if side_up in ("LONG","SHORT"):
                     if counts.get(side_up, 0) >= MAX_OPEN_PER_SIDE:
@@ -1129,6 +1368,18 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                 if exposureR >= MAX_RISK_EXPOSURE_R:
                     log.info(f"[{symbol}] skip ENTER: exposureR {exposureR:.2f} ≥ {MAX_RISK_EXPOSURE_R}")
                     return
+                # NEW: Giới hạn notional theo tỷ lệ trên vốn (S/E)
+                total_ratio, per_side_ratio, topc = _notional_ratio_caps(perf)
+                if total_ratio >= CAP_NOTIONAL_TOTAL_E:
+                    dbg = ", ".join([f"{s}/{sd}:{r:.2f}E" for s,sd,r in topc]) or "n/a"
+                    log.info(f"[{symbol}] skip ENTER: GrossNotional_total {total_ratio:.2f}E ≥ {CAP_NOTIONAL_TOTAL_E}E (top: {dbg})")
+                    return
+                if side_up in ("LONG","SHORT"):
+                    side_ratio = per_side_ratio.get(side_up, 0.0)
+                    if side_ratio >= CAP_NOTIONAL_SIDE_E:
+                        dbg = ", ".join([f"{s}/{sd}:{r:.2f}E" for s,sd,r in topc if sd==side_up]) or "n/a"
+                        log.info(f"[{symbol}] skip ENTER: GrossNotional_{side_up} {side_ratio:.2f}E ≥ {CAP_NOTIONAL_SIDE_E}E (top {side_up}: {dbg})")
+                        return
                 # Lọc tương quan/beta theo cụm trong 60 phút
                 base = _base_from_symbol(symbol)
                 cluster = _cluster_of(base)
@@ -1173,9 +1424,14 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                     hl0_4h_hi=hi4, hl0_4h_lo=lo4,
                     hl0_1h_hi=hi1, hl0_1h_lo=lo1,
                 )
+
+                # Sau khi mở lệnh thành công → kiểm tra có phải lệnh đầu tiên sau 7:00 sáng hôm nay không
+                try:
+                    _try_post_free_signal_if_first_today(plan_for_teaser)
+                except Exception as e:
+                    log.warning(f"[FreeSignal] check/post failed: {e}")
         except Exception as e:
-            log.warning(f"[{symbol}] ENTER flow failed: {e}")
-                
+            log.warning(f"[{symbol}] ENTER flow failed: {e}")        
     # --- end teaser post ---
 
     # Sau khi có dữ liệu df4 và price hiện tại, chạy các check thoát sớm/BE
@@ -1185,6 +1441,7 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
             price_now = float(df4["close"].iloc[-1])
         elif df1 is not None and len(df1):
             price_now = float(df1["close"].iloc[-1])
+
         if price_now is not None:
             # Dùng lại 'bundle' đã build từ feats_by_tf ở trên (đúng cấu trúc)
             _time_exit_and_breakeven_checks(
@@ -1192,7 +1449,7 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                 dfs.get("4H"),
                 price_now,
                 bundle,
-                SignalPerfDB(JsonStore(os.getenv("DATA_DIR", "./data")))
+                SignalPerfDB(JsonStore(os.getenv("DATA_DIR", "./data"))),
             )
     except Exception as e:
         log.warning(f"[{symbol}] post-scan checks failed: {e}")
@@ -1298,7 +1555,9 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                         close_pct = float(_pct(entry, close_px, side))
                         risk_pct  = float(_risk_pct(entry, sl, side))
                         R = float(close_pct / risk_pct) if risk_pct > 0 else 0.0
-                        R_weighted = 0.2 * R   # theo convention scale-out 20%
+                        # Scale-out động: phần vị thế chưa chốt tính theo trọng số còn lại
+                        rem_w = _remaining_weight(t)
+                        R_weighted = float(t.get("realized_R", 0.0)) + rem_w * R
 
                         # ĐÓNG & LƯU SỐ LIỆU ĐỂ KPI ĐỌC
                         perf.close(t["sid"], "REVERSAL")   # map -> status="CLOSE"
@@ -1307,7 +1566,7 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                             t["sid"],
                             close_px=close_px,
                             close_pct=close_pct,
-                            realized_R=R_weighted  # đã weighted 20%
+                            realized_R=R_weighted  # đã cộng phần còn lại theo rem_w
                         )
                         note = f"📌 Đóng lệnh sớm do có tín hiệu đảo chiều."
                         extra = {"margin_pct": close_pct}
@@ -1383,7 +1642,7 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                     hits["TP5"] = int(__import__("time").time())
                     perf.close(t["sid"], "TP5")
                     t["status"] = "CLOSE"
-                    note = "✨ TP5 hit — Đóng lệnh."
+                    note = "✨ TP5 hit — Hoàn thành tất cả mục tiêu."
                     extra = {"margin_pct": margin_pct(float(t["tp5"]))}
                     if tn2:
                         if msg_id:
@@ -1421,11 +1680,33 @@ def process_symbol(symbol: str, cfg: Config, limit: int, ex=None):
                             highest, hit_price = "TP2", float(t.get("tp2") or t.get("tp1") or entry)
                         else:
                             highest, hit_price = "TP1", float(t.get("tp1") or entry)
+
+                        # Tính phần R còn lại tại giá đóng (hit_price)
+                        try:
+                            risk_pct = abs((entry - float(t.get("sl"))) / entry) if entry else 0.0
+                        except Exception:
+                            risk_pct = 0.0
+                        if risk_pct > 0:
+                            if side == "LONG":
+                                close_pct2 = (hit_price - entry) / entry * 100.0
+                            else:
+                                close_pct2 = (entry - hit_price) / entry * 100.0
+                            R2 = (close_pct2 / 100.0) / risk_pct
+                        else:
+                            close_pct2, R2 = 0.0, 0.0
+                        rem_w2 = _remaining_weight(t)
+                        R_weighted2 = float(t.get("realized_R", 0.0)) + rem_w2 * R2
                 
                         perf.close(t["sid"], "TRAIL")   # khác biệt: đóng theo SL động
                         t["status"] = "CLOSE"
                         note = f"📌 Đóng lệnh — Giá quay về SL động sau khi đã đạt {highest}."
                         extra = {"margin_pct": margin_pct(hit_price)}
+                        perf.update_fields(
+                            t["sid"],
+                            close_px=hit_price,
+                            close_pct=close_pct2,
+                            realized_R=R_weighted2
+                        )
                         if tn2:
                             if msg_id:
                                 tn2.send_channel_update(int(msg_id), render_update(t, note, extra))
@@ -1532,38 +1813,46 @@ def loop_scheduler():
         try:
             if now.hour == 18 and now.minute == 30 and (last_kpi_day != (now.year, now.month, now.day)):
                 last_kpi_day = (now.year, now.month, now.day)
-                # Teaser KPI: list 24H (chỉ lệnh ĐÓNG-chưa-báo-cáo) + hiệu suất NGÀY
+                # Teaser KPI 24H — dùng số THỰC NHẬN: realized_R (R_weighted) & pct_weighted
                 perf = SignalPerfDB(JsonStore(os.getenv("DATA_DIR", "./data")))
-                detail_24h, sids_to_mark = perf.kpis_24h_unreported()
-                kpi_day = perf.kpis("day")           # sumR, wr, ...
-                detail_day = perf.kpis_detail("day") # equity 1x + tp_counts
+                # Lấy dữ liệu 24H chuẩn hoá
+                detail_24h = perf.kpis_24h_detail() if hasattr(perf, "kpis_24h_detail") else {"items": [], "totals": {}}
+                totals = detail_24h.get("totals") or {}
+                # Tóm tắt hiệu suất ngày để render (R & % thực nhận)
+                kpi_day = {
+                    "wr":       float(totals.get("win_rate", 0.0) or 0.0),
+                    "avgR":     float(totals.get("avg_R", 0.0) or 0.0),
+                    "sumR":     float(totals.get("sum_R", 0.0) or 0.0),
+                    "avgPctW":  float(totals.get("avg_pct_weighted", 0.0) or 0.0),
+                    "sumPctW":  float(totals.get("sum_pct_weighted", 0.0) or 0.0),
+                }
+                # detail_day chỉ cần truyền các khoá % để template hiển thị nếu có
+                detail_day = {
+                    "avgPctW": kpi_day["avgPctW"],
+                    "sumPctW": kpi_day["sumPctW"],
+                }
                 report_date_str = now.strftime("%d/%m/%Y")
-          
+
                 tn = _get_notifier()
                 fb = _get_fb_notifier()
                 from templates import render_kpi_teaser_two_parts
                 html = render_kpi_teaser_two_parts(detail_24h, kpi_day, detail_day, report_date_str)
-                # Telegram (nếu bật)
-                if tn:
-                    tn.send_kpi24(html)
-                # Fanpage (độc lập)
-                if fb:
-                    try:
-                        fb.post_kpi_24h(html)
-                    except Exception as e:
-                        log.warning(f"KPI-24H fanpage failed: {e}")
-                # Đánh dấu đã report (không phụ thuộc TN)
+                # --- GỬI KPI 24H ---
                 try:
-                    perf.mark_kpi24_reported(sids_to_mark)
-                except Exception:
-                    pass
-            # NEW: KPI TUẦN — 08:16 sáng Thứ Bảy (Asia/Ho_Chi_Minh) — Telegram & Fanpage độc lập
-            if now.weekday() == 5 and now.hour == 8 and now.minute == 16:
+                    if tn:
+                        tn.send_kpi24(html)
+                    if fb:
+                        fb.post_kpi_24h(html)
+                    log.info("✅ KPI 24H posted to Telegram & Fanpage")
+                except Exception as e:
+                    log.warning(f"KPI 24H post failed: {e}")
+            # NEW: KPI TUẦN — 09:00 sáng Chủ nhật (Asia/Ho_Chi_Minh) — Telegram & Fanpage độc lập
+            if now.weekday() == 6 and now.hour == 9 and now.minute == 0:
                 wk_key = (now.isocalendar().year, now.isocalendar().week)
                 if last_kpi_week != wk_key:
                     last_kpi_week = wk_key
-                    # cửa sổ tuần: từ 00:00 thứ Bảy tuần trước đến thời điểm chạy hiện tại
-                    today_00 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    # Cửa sổ tuần: từ 00:00 Chủ nhật tuần trước đến thời điểm chạy hiện tại
+                    today_00   = now.replace(hour=0, minute=0, second=0, microsecond=0)
                     week_start = today_00 - timedelta(days=7)
                     start_ts = int(week_start.timestamp())
                     end_ts   = int(now.timestamp())
@@ -1574,16 +1863,15 @@ def loop_scheduler():
                     html_w = render_kpi_week(detail_week, week_label)
                     tn = _get_notifier()
                     fb = _get_fb_notifier()
-                    if tn:
-                        try:
-                            tn.send_kpi24(html_w)  # tái dùng sender (hoặc tạo send_kpi_week nếu bạn muốn tách)
-                        except Exception as e:
-                            log.warning(f"KPI-week telegram failed: {e}")
-                    if fb:
-                        try:
+                    # --- GỬI KPI TUẦN ---
+                    try:
+                        if tn:
+                            tn.send_kpi24(html_w)
+                        if fb:
                             fb.post_kpi_week(html_w)
-                        except Exception as e:
-                            log.warning(f"KPI-week fanpage failed: {e}")
+                        log.info("✅ KPI Week posted to Telegram & Fanpage")
+                    except Exception as e:
+                        log.warning(f"KPI Week post failed: {e}")
                     # label như ví dụ: 20-27/9/2025
                     def _ds(d):
                         dd = d.strftime("%d").lstrip("0")
