@@ -76,6 +76,37 @@ def _ema(series: pd.Series, span: int) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
     return s.ewm(span=span, adjust=False).mean()
 
+# ============================================================
+# Market Regime Detection (Range / Trend)
+# ============================================================
+def _detect_market_regime(df: pd.DataFrame) -> str:
+    """
+    Phân loại nhanh chế độ thị trường:
+      - range: BBW < 6%, ADX < 20
+      - trend: ADX > 25 hoặc BBW mở rộng nhanh
+      - high-vol: NATR > 0.06
+    """
+    try:
+        if df is None or len(df) < 20:
+            return "unknown"
+        bbw = float(df["bb_width_pct"].iloc[-2]) if "bb_width_pct" in df.columns else 0
+        close = float(df["close"].iloc[-2])
+        atr = float(df["atr14"].iloc[-2]) if "atr14" in df.columns else 0
+        natr = atr / close if close > 0 else 0
+        adx = 0.0
+        if "adx" in df.columns:
+            adx = float(df["adx"].iloc[-2])
+
+        if natr > 0.06:
+            return "high-vol"
+        if bbw < 6.0 and adx < 20.0:
+            return "range"
+        if adx >= 25.0 or bbw >= 8.0:
+            return "trend"
+        return "normal"
+    except Exception:
+        return "unknown"
+
 # --- safe dataframe access --------------------------------------------------
 def _last_closed(df: pd.DataFrame) -> Optional[pd.Series]:
     try:
@@ -380,6 +411,19 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
     df1h = _ensure_cols(dfs.get("1H")) if dfs.get("1H") is not None else None
     df4h = _ensure_cols(dfs.get("4H")) if dfs.get("4H") is not None else None
 
+    # --- Detect market regime for intraday context ---
+    regime_15m = _detect_market_regime(df15)
+    regime_1h  = _detect_market_regime(df1h)
+    regime = regime_15m if regime_15m != "unknown" else regime_1h
+
+    notes_regime = [f"Regime={regime}"]
+    if regime == "range":
+        notes_regime.append("Range regime → prefer flush-reclaim/pullback")
+    elif regime == "trend":
+        notes_regime.append("Trend regime → prefer breakout/continuation")
+    elif regime == "high-vol":
+        notes_regime.append("High-vol regime → only flush setups allowed")
+
     if df1h is None or df15 is None or len(df1h) == 0 or len(df15) == 0:
         return _with_origin({"decision": "AVOID", "symbol": sym, "why": "missing 15m/1H data"})
 
@@ -410,7 +454,10 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
 
     if not ok or direction is None:
         return _with_origin({"decision": "WAIT", "symbol": sym, "why": "no form matched"})
-      
+
+    # append regime note after form detection
+    notes = notes_regime + notes
+
     # 2) guards
     # 2a) market guard
     g_block, g_why = _guard_market(bundle, direction, cfg)
@@ -452,7 +499,7 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
             sl = entry + 0.8 * (float(_last_closed(df1h).get("atr14", atr15)) or atr15)
     elif state == "mean_rev":
         last1 = _last_closed(df1h)
-        ema_ref = float(last1.get("ema99" if direction == "LONG" else "ema99", last1.get("ema200", cl15)))
+        ema_ref = float(last1.get("ema99" if direction == "LONG" else "ema200", cl15))
         entry = ema_ref
         if direction == "LONG":
             sl = min(lo15, entry - 1.0 * atr15)
@@ -495,6 +542,9 @@ def decide_intraday(bundle: Dict[str, Any], cfg: Optional[IntradayCfg] = None) -
             "sl_to_tp2_after_tp3": True,
         },
     }
+
+    plan["meta"] = {"regime": regime}
+    plan["notes"] = notes
     return _with_origin(plan)
 
 # Convenience alias used by external engine
