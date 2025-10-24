@@ -227,9 +227,19 @@ class TFThresholds:
 @dataclass
 class Config:
     per_tf: Dict[str, TFThresholds] = field(default_factory=lambda: {
-        "1H": TFThresholds(break_buffer_atr=0.35, vol_ratio_thr=1.3, vol_z_thr=0.7, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.35, hvn_guard_atr=0.7),
-        "4H": TFThresholds(break_buffer_atr=0.20, vol_ratio_thr=1.25, vol_z_thr=0.6, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.3,  hvn_guard_atr=0.8),
-        "1D": TFThresholds(break_buffer_atr=0.15, vol_ratio_thr=1.2, vol_z_thr=0.5, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.25, hvn_guard_atr=1.0),
+        "15M": TFThresholds(
+            break_buffer_atr=0.25,   # break sớm nhưng có buffer
+            vol_ratio_thr=1.2,       # volume vừa phải
+            vol_z_thr=0.6,           # tránh nhiễu
+            rsi_long=55.0, rsi_short=45.0,
+            bbw_lookback=34,         # squeeze nhìn ngắn hơn
+            zigzag_pct=0.9,          # nhạy swing biên range
+            ema_spread_small_atr=0.25,
+            hvn_guard_atr=0.4        # cho phép gần HVN hơn khi giao dịch biên
+        ),
+        "1H": TFThresholds(break_buffer_atr=0.35, vol_ratio_thr=1.3, vol_z_thr=0.7, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.35, hvn_guard_atr=0),
+        "4H": TFThresholds(break_buffer_atr=0.30, vol_ratio_thr=1.4, vol_z_thr=0.8, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.30, hvn_guard_atr=0.7),
+        "1D": TFThresholds(break_buffer_atr=0.25, vol_ratio_thr=1.5, vol_z_thr=1.0, rsi_long=55, rsi_short=45, bbw_lookback=50, zigzag_pct=2.0, ema_spread_small_atr=0.25, hvn_guard_atr=1.0),
     })
 
 PRIMARY_TF = "4H"
@@ -1060,6 +1070,8 @@ def build_evidence_bundle(symbol: str, features_by_tf: Dict[str, Dict[str, Any]]
         'price_breakdown': ev_pdn,
         'price_reclaim': ev_prc,
         'sideways': ev_sdw,
+        'false_breakout': ev_fb_out,
+        'false_breakdown': ev_fb_dn,
         # expose primary/confirm plus summary fields for main logger
         'volume': {
             'primary': ev_vol_1h,
@@ -1135,4 +1147,6 @@ TF_GUIDANCE: Dict[str, Dict[str, List[str]]] = {
     'bb_expanding':    {'required': ['1H'], 'optional': []},
     'throwback':       {'required': ['1H'], 'optional': ['4H']},
     'pullback':        {'required': ['1H'], 'optional': ['4H']},
+    'false_breakout':  {'required': ['1H'], 'optional': ['4H']},
+    'false_breakdown': {'required': ['1H'], 'optional': ['4H']},
 }
