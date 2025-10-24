@@ -118,6 +118,61 @@ def _guard_near_bb_low_4h_and_rsi1h_extreme(
         pass
     return {"block": False, "why": ""}
 
+# ===============================
+# Unified Guard for Proximity (v2)
+# Combines BB/EMA proximity + RSI extremes into one multi-TF guard
+# ===============================
+def guard_proximity_unified(
+    side: Optional[str],
+    entry: Optional[float],
+    feats: Dict[str, Any],
+    tfs: Iterable[str] = ("1H","4H"),
+    *,
+    state: Optional[str] = None,
+    rr_ok: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Unified guard kết hợp logic BB/EMA proximity và RSI cực trị.
+    Trả {"block":bool, "why":str}.
+    """
+    if side not in ("long","short") or entry is None:
+        return {"block": False, "why": ""}
+
+    # Retest setups được phép gần mid/EMA
+    if state in ("retest_support", "retest_resistance"):
+        return {"block": False, "why": ""}
+
+    reasons=[]
+    blocked=False
+
+    for tf in tfs:
+        atr = _atr_from_features_tf(feats, tf)
+        if atr<=0: continue
+        lv = _soft_levels_by_tf(feats, tf)
+        if not lv: continue
+        bb_u, bb_m, bb_l = lv.get("bb_upper"), lv.get("bb_mid"), lv.get("bb_lower")
+        e20, e50 = lv.get("ema20"), lv.get("ema50")
+        rsi = _rsi_from_features_tf(feats, tf)
+
+        thr_band=0.35*atr
+        thr_center=0.30*atr
+
+        def near(a,b,thr): return (a is not None) and (b is not None) and (abs(a-b)<=thr)
+
+        # === Side-based guards ===
+        if side=="long":
+            if near(entry,bb_u,thr_band): reasons.append(f"too_close_BBupper({tf})")
+            if near(entry,e50,thr_center): reasons.append(f"too_close_EMA50({tf})")
+            if rsi and rsi>=80: reasons.append(f"RSI_high_{tf}={rsi:.1f}")
+        if side=="short":
+            if near(entry,bb_l,thr_band): reasons.append(f"too_close_BBlower({tf})")
+            if near(entry,e50,thr_center): reasons.append(f"too_close_EMA50({tf})")
+            if rsi and rsi<=20: reasons.append(f"RSI_low_{tf}={rsi:.1f}")
+
+    if reasons:
+        blocked=True
+    return {"block":blocked,"why":"; ".join(reasons)}
+
 def _near_soft_level_guard_multi(
     side: Optional[str],
     entry: Optional[float],
