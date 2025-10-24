@@ -137,6 +137,37 @@ def compute_trend(df: pd.DataFrame) -> Dict[str, Any]:
         "ema_spread": spread, "ema50_slope": ema50_slope
     }
 
+# ============================================
+# ADX Feature (Average Directional Index)
+# ============================================
+def compute_adx(df: pd.DataFrame, period: int = 14) -> Dict[str, Any]:
+    """
+    Tính ADX(14) và trả về dict {adx: float, trend_state: str}
+    """
+    try:
+        high, low, close = df["high"], df["low"], df["close"]
+        plus_dm = high.diff()
+        minus_dm = low.diff().abs()
+        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs()
+        ], axis=1).max(axis=1)
+
+        atr = tr.ewm(alpha=1/period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+        minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.ewm(alpha=1/period, adjust=False).mean()
+        adx_val = float(adx.iloc[-1])
+        trend_state = "strong" if adx_val >= 25 else "weak"
+        return {"adx": adx_val, "trend_state": trend_state}
+    except Exception:
+        return {"adx": float("nan"), "trend_state": "unknown"}
 
 def compute_candles(df: pd.DataFrame) -> Dict[str, bool]:
     last = _last_closed_bar(df)
