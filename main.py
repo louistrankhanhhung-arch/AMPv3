@@ -31,7 +31,7 @@ from evidence_evaluators import build_evidence_bundle, Config, _reversal_signal
 from notifier_telegram import TelegramNotifier
 from storage import SignalPerfDB, JsonStore, UserDB
 from templates import render_update, render_teaser
-from fb_notifier import FBNotifier
+
 
 # ============================================================
 # FREE FULL SIGNAL (đăng 1 lệnh đầu tiên sau 7:00 sáng mỗi ngày)
