@@ -48,8 +48,12 @@ class SideCfg:
     # TP ladder mặc định cho tính RR (fallback khi thiếu band)
     rr_targets: Tuple[float, float, float] = (1.2, 2.0, 3.0)
 
-    # Timeframes (trigger/execution thống nhất 4H)
-    tf_primary: str = "4H"
+    # Timeframes
+    # primary: nơi build setup chính (giờ chuyển sang 1H cho intraday)
+    tf_primary: str = "1H"
+    # trigger_tf: nơi dò tín hiệu sớm (range/break/trend) — 15M
+    tf_trigger: str = "15M"
+    # confirm vẫn dựa 4H để lọc nhiễu khi vol thấp
     tf_confirm: str = "4H"
 
     # --- SL regime adaptation ---
