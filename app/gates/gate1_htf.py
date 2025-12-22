@@ -19,6 +19,17 @@ def gate1_htf_clarity(snapshot: MarketSnapshot) -> Gate1Result:
 
     liq = compute_liquidity_targets(snapshot.candles_4h, lookback=80)
 
+    # Quality filter (A-mode): skip if spread is too wide (illiquid / wick-prone)
+    sp = snapshot.spread_pct
+    if sp is not None:
+        sym = snapshot.symbol.upper()
+        if sym in ("BTCUSDT", "ETHUSDT"):
+            if sp > 0.01:
+                return Gate1Result(False, "spread_too_wide_core", htf, liq)
+        else:
+            if sp > 0.05:
+                return Gate1Result(False, "spread_too_wide_alt", htf, liq)
+
     # Crypto-friendly location rules:
     # - If HTF is range: require clear extremes (avoid wide mid).
     # - If HTF is trending: avoid only the "dead mid" band (narrow), allow edge zones.
