@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from collections import deque
 
 
 @dataclass
@@ -19,6 +20,8 @@ class TTLCache:
     """
     def __init__(self) -> None:
         self._store: Dict[Tuple[str, ...], CacheItem] = {}
+        # Non-TTL store for rolling series / in-process state
+        self._persist: Dict[Tuple[str, ...], Any] = {}
 
     def get(self, key: Tuple[str, ...]) -> Optional[Any]:
         item = self._store.get(key)
@@ -32,5 +35,22 @@ class TTLCache:
     def set(self, key: Tuple[str, ...], value: Any, ttl_sec: int) -> None:
         self._store[key] = CacheItem(value=value, expires_at=time.time() + ttl_sec)
 
+    def get_persist(self, key: Tuple[str, ...]) -> Optional[Any]:
+        return self._persist.get(key)
+
+    def set_persist(self, key: Tuple[str, ...], value: Any) -> None:
+        self._persist[key] = value
+
+    def get_or_create_deque(self, key: Tuple[str, ...], maxlen: int):
+        """
+        Convenience helper to store a rolling deque (no TTL).
+        """
+        d = self._persist.get(key)
+        if d is None:
+            d = deque(maxlen=maxlen)
+            self._persist[key] = d
+        return d
+
     def clear(self) -> None:
         self._store.clear()
+        self._persist.clear()
