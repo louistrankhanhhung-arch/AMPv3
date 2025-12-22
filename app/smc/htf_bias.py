@@ -1,7 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-from data.models import Candle
+from app.data.models import Candle
 
 @dataclass(frozen=True)
 class HTFBias:
