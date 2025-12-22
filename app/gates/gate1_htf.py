@@ -1,9 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
-from data.models import MarketSnapshot
-from smc.htf_bias import compute_htf_bias, HTFBias
-from smc.liquidity import compute_liquidity_targets, LiquidityTargets
+from app.data.models import MarketSnapshot
+from app.smc.htf_bias import compute_htf_bias, HTFBias
+from app.smc.liquidity import compute_liquidity_targets, LiquidityTargets
 
 @dataclass(frozen=True)
 class Gate1Result:
