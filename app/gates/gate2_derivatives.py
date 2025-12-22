@@ -30,6 +30,33 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     oi_delta_pct = ctx.oi_delta_pct
     oi_spike_z = ctx.oi_spike_z
 
+    # --- A-mode hard guards (work even when rolling history is insufficient) ---
+    # Goal: allow "crowded_squeeze" classification immediately if risk is obvious,
+    # while keeping "healthy_trend" strict (requires rolling readiness).
+    hard_crowded_ratio = False
+    if isinstance(rlp, (int, float)):
+        # stricter than soft crowding: extreme skew
+        hard_crowded_ratio = float(rlp) >= 70.0 or float(rlp) <= 30.0
+
+    hard_extreme_funding = False
+    if isinstance(funding, (int, float)):
+        # absolute funding guard (USD-M). Conservative defaults.
+        # If you find it's too strict/loose, tune to 0.00015..0.00030.
+        hard_extreme_funding = abs(float(funding)) >= 0.00020
+
+    if hard_crowded_ratio or hard_extreme_funding:
+        reason = "ratio_crowded_hard" if hard_crowded_ratio else "funding_extreme_hard"
+        return Gate2Result(
+            passed=True,
+            reason=reason,
+            regime="crowded_squeeze",
+            ratio_long_pct=rlp,
+            funding=funding,
+            funding_z=funding_z,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+        )
+
     if not ctx.ready:
         return Gate2Result(
             passed=False,
