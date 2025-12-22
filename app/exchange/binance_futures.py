@@ -22,10 +22,9 @@ def _normalize_long_pct(raw_ratio: Optional[float], ratio_kind: str, meta: Dict[
         # If looks like percent already
         if x > 1.5:
             meta["ratio_scale"] = "0-100"
-            return max(0.0, min(100.0, x))
+            return round(max(0.0, min(100.0, x)), 2)
         meta["ratio_scale"] = "0-1"
-        return max(0.0, min(100.0, x * 100.0))
-
+        return round(max(0.0, min(100.0, x * 100.0)), 2)
     meta["ratio_scale"] = "ls_ratio"
     return None
 
