@@ -153,5 +153,6 @@ class BinanceFuturesClient(ExchangeClient):
             funding_rate=funding,
             open_interest=oi,
             long_short_ratio=ratio,
+            ratio_long_pct=ratio_long_pct,
             meta=meta,
         )
