@@ -2,11 +2,32 @@ from __future__ import annotations
 
 import time
 import requests
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from app.config import AppConfig
 from app.data.models import Candle, Derivatives1H
 from app.exchange.base import ExchangeClient
+
+def _normalize_long_pct(raw_ratio: Optional[float], ratio_kind: str, meta: Dict[str, str]) -> Optional[float]:
+    """
+    Normalize to long percent in [0, 100].
+    - For Binance globalLongShortAccountRatio, 'longAccount' may be 0..1 or 0..100 depending on endpoint behavior.
+    - For 'longShortRatio' (L/S), cannot reliably convert to % without both sides -> return None.
+    """
+    if raw_ratio is None:
+        return None
+
+    if ratio_kind == "longAccount":
+        x = float(raw_ratio)
+        # If looks like percent already
+        if x > 1.5:
+            meta["ratio_scale"] = "0-100"
+            return max(0.0, min(100.0, x))
+        meta["ratio_scale"] = "0-1"
+        return max(0.0, min(100.0, x * 100.0))
+
+    meta["ratio_scale"] = "ls_ratio"
+    return None
 
 
 class BinanceFuturesClient(ExchangeClient):
@@ -46,14 +67,27 @@ class BinanceFuturesClient(ExchangeClient):
         except Exception:
             return None
 
-    def fetch_spread_bps(self, symbol: str) -> Optional[float]:
-        # Best-effort using bookTicker (top-of-book)
+    def fetch_top_of_book(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """
+        Return (bid, ask) from Binance futures bookTicker.
+        """
         try:
             r = requests.get(f"{self.base}/fapi/v1/ticker/bookTicker", params={"symbol": symbol}, timeout=8)
             r.raise_for_status()
             j = r.json()
             bid = float(j["bidPrice"])
             ask = float(j["askPrice"])
+            return (bid, ask)
+        except Exception:
+            return None
+
+    def fetch_spread_bps(self, symbol: str) -> Optional[float]:
+        # Best-effort using bookTicker (top-of-book)
+        try:
+            tob = self.fetch_top_of_book(symbol)
+            if not tob:
+                return None
+            bid, ask = tob
             mid = (bid + ask) / 2.0
             if mid <= 0:
                 return None
@@ -87,6 +121,7 @@ class BinanceFuturesClient(ExchangeClient):
         # Long/Short Ratio: Binance provides "Global Long/Short Account Ratio" endpoints.
         # We'll attempt 1h interval, last 1 datapoint. If fails, return None.
         ratio = None
+        ratio_kind = ""
         try:
             r = requests.get(
                 f"{self.base}/futures/data/globalLongShortAccountRatio",
@@ -101,14 +136,18 @@ class BinanceFuturesClient(ExchangeClient):
                 long_acc = arr[0].get("longAccount")
                 if long_acc is not None:
                     ratio = float(long_acc)  # percent of longs (0-1 or 0-100 depending); keep raw in meta too
-                    meta["ratio_kind"] = "longAccount"
+                    ratio_kind = "longAccount"
+                    meta["ratio_kind"] = ratio_kind
                 else:
                     lsr = arr[0].get("longShortRatio")
                     if lsr is not None:
                         ratio = float(lsr)
-                        meta["ratio_kind"] = "longShortRatio"
+                        ratio_kind = "longShortRatio"
+                        meta["ratio_kind"] = ratio_kind
         except Exception as e:
             meta["ratio_err"] = str(e)
+
+        ratio_long_pct = _normalize_long_pct(ratio, ratio_kind, meta)
 
         return Derivatives1H(
             funding_rate=funding,
