@@ -22,6 +22,20 @@ def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher
     mark = client.fetch_mark_price(symbol)
     spread = client.fetch_spread_bps(symbol)
 
+    bid = None
+    ask = None
+    spread_pct = None
+    try:
+        tob = client.fetch_top_of_book(symbol)
+        if tob:
+            bid, ask = tob
+            mid = (bid + ask) / 2.0
+            if mid > 0:
+                spread_pct = (ask - bid) / mid * 100.0
+    except Exception:
+        # best-effort only
+        pass
+
     now = int(time.time())
     return MarketSnapshot(
         symbol=symbol,
@@ -30,6 +44,9 @@ def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher
         candles_4h=candles_4h,
         deriv_1h=d1h,
         spread_bps=spread,
+        spread_pct=spread_pct,
+        bid=bid,
+        ask=ask,
         mark_price=mark,
         last_updated_ts=now,
     )
@@ -54,14 +71,18 @@ def main() -> None:
                 # Tầng 1: chỉ log để kiểm tra pipeline.
                 # Tầng 2 trở đi sẽ gọi gates/smc và notify.
                 log.info(
-                    "SNAPSHOT %s | ex=%s | mark=%s | spread_bps=%s | funding=%s | oi=%s | ratio=%s",
+                    "SNAPSHOT %s | ex=%s | mark=%s | bid=%s | ask=%s | spread_bps=%s | spread_pct=%s | funding=%s | oi=%s | ratio=%s | ratio_long_pct=%s",
                     snap.symbol,
                     client.name,
                     snap.mark_price,
+                    snap.bid,
+                    snap.ask,
                     snap.spread_bps,
+                    snap.spread_pct,
                     snap.deriv_1h.funding_rate,
                     snap.deriv_1h.open_interest,
                     snap.deriv_1h.long_short_ratio,
+                    getattr(snap.deriv_1h, "ratio_long_pct", None),
                 )
 
             time.sleep(cfg.scan_interval_sec)
