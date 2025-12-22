@@ -109,13 +109,30 @@ class BinanceFuturesClient(ExchangeClient):
             meta["funding_err"] = str(e)
 
         # Open Interest (current)
-        oi = None
+        # Binance USD-M endpoint returns openInterest in "contracts" (base-asset units).
+        # For Gate 2, we prefer USD notional: OI_notional ≈ OI_contracts * markPrice.
+        oi = None  # will store USD notional (USDT)
+        oi_contracts: Optional[float] = None
         try:
             r = requests.get(f"{self.base}/fapi/v1/openInterest", params={"symbol": symbol}, timeout=10)
             r.raise_for_status()
-            oi = float(r.json()["openInterest"])
+            oi_contracts = float(r.json()["openInterest"])
         except Exception as e:
             meta["oi_err"] = str(e)
+
+        # Convert OI to USD notional using mark price (best-effort).
+        mark = self.fetch_mark_price(symbol)
+        if oi_contracts is not None:
+            meta["oi_kind"] = "contracts"
+            meta["oi_contracts"] = str(oi_contracts)
+            if mark is not None and mark > 0:
+                oi = float(oi_contracts) * float(mark)
+                meta["oi_notional_ccy"] = "USDT"
+                meta["oi_mark_used"] = str(mark)
+            else:
+                # Fallback to contracts if mark is unavailable; keep oi as None for strict mode if desired
+                meta["oi_notional_err"] = "mark_unavailable"
+                oi = None
 
         # Long/Short Ratio: Binance provides "Global Long/Short Account Ratio" endpoints.
         # We'll attempt 1h interval, last 1 datapoint. If fails, return None.
