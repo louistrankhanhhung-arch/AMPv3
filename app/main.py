@@ -12,6 +12,7 @@ from app.data.derivatives_fetcher import DerivativesFetcher
 from app.data.models import MarketSnapshot
 
 from app.gates.gate1_htf import gate1_htf_clarity
+from app.gates.gate2_derivatives import gate2_derivatives_regime
 
 
 def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher, client) -> MarketSnapshot:
@@ -102,6 +103,24 @@ def main() -> None:
                     snap.spread_pct,
                     getattr(snap.deriv_1h, "ratio_long_pct", None),
                 )
+
+                # Tầng 3 - Gate 2: Derivatives Regime (ONLY if Gate 1 passed - A-mode strict)
+                if g1.passed:
+                    ctx2 = deriv.get_gate2_ctx(sym, ttl_sec=30)
+                    g2 = gate2_derivatives_regime(snap, ctx2)
+                    log.info(
+                        "G2 %s %s | reason=%s regime=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | hist=%s",
+                        snap.symbol,
+                        "PASS" if g2.passed else "FAIL",
+                        getattr(g2, "reason", None),
+                        getattr(g2, "regime", None),
+                        getattr(g2, "ratio_long_pct", None),
+                        getattr(g2, "funding", None),
+                        getattr(g2, "funding_z", None),
+                        getattr(g2, "oi_delta_pct", None),
+                        getattr(g2, "oi_spike_z", None),
+                        getattr(ctx2, "history_len", None),
+                    )
 
             time.sleep(cfg.scan_interval_sec)
 
