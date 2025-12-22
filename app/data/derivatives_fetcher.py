@@ -22,6 +22,9 @@ class Gate2DerivativesCtx:
     oi_delta: Optional[float]
     oi_delta_pct: Optional[float]
     oi_spike_z: Optional[float]
+    funding_z: Optional[float]
+    ratio_dev: Optional[float]
+    ready: bool
     history_len: int
 
 class DerivativesFetcher:
@@ -102,6 +105,34 @@ class DerivativesFetcher:
                 else:
                     oi_spike_z = 0.0
 
+        # Funding z-score (best-effort) on recent funding samples
+        funding_z: Optional[float] = None
+        cur_funding = d.funding_rate
+        if cur_funding is not None:
+            fvals: List[float] = []
+            pts_f = list(series)[-z_window:]
+            for p in pts_f:
+                fv = p.get("funding")
+                if isinstance(fv, (int, float)):
+                    fvals.append(float(fv))
+            if len(fvals) >= max(8, min(12, z_window // 2)):
+                fmean = sum(fvals) / len(fvals)
+                fvar = sum((x - fmean) ** 2 for x in fvals) / max(1, (len(fvals) - 1))
+                fstd = math.sqrt(fvar)
+                if fstd > 1e-12:
+                    funding_z = (float(cur_funding) - fmean) / fstd
+                else:
+                    funding_z = 0.0
+
+        # Ratio deviation from 50 (%). Useful for crowding checks.
+        ratio_dev: Optional[float] = None
+        rlp = getattr(d, "ratio_long_pct", None)
+        if isinstance(rlp, (int, float)):
+            ratio_dev = abs(float(rlp) - 50.0)
+
+        # A-mode: only trust Gate 2 when we have enough samples
+        ready = len(series) >= max(12, min(18, z_window))    
+
         return Gate2DerivativesCtx(
             symbol=symbol,
             exchange=self.client.name,
@@ -110,5 +141,8 @@ class DerivativesFetcher:
             oi_delta=oi_delta,
             oi_delta_pct=oi_delta_pct,
             oi_spike_z=oi_spike_z,
+            funding_z=funding_z,
+            ratio_dev=ratio_dev,
+            ready=ready,
             history_len=len(series),
         )
