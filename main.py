@@ -3,13 +3,13 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from app.config import AppConfig
-from app.utils.logger import setup_logger
-from app.exchange.router import ExchangeRouter
-from app.data.cache import TTLCache
-from app.data.market_fetcher import MarketFetcher
-from app.data.derivatives_fetcher import DerivativesFetcher
-from app.data.models import MarketSnapshot
+from config import AppConfig
+from utils.logger import setup_logger
+from exchange.router import ExchangeRouter
+from data.cache import TTLCache
+from data.market_fetcher import MarketFetcher
+from data.derivatives_fetcher import DerivativesFetcher
+from data.models import MarketSnapshot
 
 
 def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher, client) -> MarketSnapshot:
