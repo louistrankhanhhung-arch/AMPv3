@@ -11,6 +11,23 @@ from app.data.market_fetcher import MarketFetcher
 from app.data.derivatives_fetcher import DerivativesFetcher
 from app.data.models import MarketSnapshot
 
+from app.gates.gate1_htf import gate1_htf_clarity
+
+# ...
+g1 = gate1_htf_clarity(snap)
+
+log.info(
+    "G1 %s %s | bias=%s loc=%s pos=%.2f | liq_above=%s liq_below=%s | spread_pct=%s | ratio_long_pct=%s",
+    snap.symbol,
+    "PASS" if g1.passed else "FAIL",
+    (g1.htf.bias if g1.htf else None),
+    (g1.htf.location if g1.htf else None),
+    (g1.htf.pos_pct if g1.htf else -1),
+    (g1.liq.above if g1.liq else None),
+    (g1.liq.below if g1.liq else None),
+    snap.spread_pct,
+    snap.deriv_1h.ratio_long_pct,
+)
 
 def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher, client) -> MarketSnapshot:
     candles_15m = market.get_candles(symbol, "15m", limit=240, ttl_sec=20)
