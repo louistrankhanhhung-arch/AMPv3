@@ -25,8 +25,8 @@ def gate1_htf_clarity(snapshot: MarketSnapshot) -> Gate1Result:
     pos = float(getattr(htf, "pos_pct", 0.5))
 
     RANGE_EXTREME = 0.30
-    TREND_DEAD_MID_LOW = 0.45
-    TREND_DEAD_MID_HIGH = 0.55
+    TREND_DEAD_MID_LOW = 0.42
+    TREND_DEAD_MID_HIGH = 0.58
 
     if htf.bias == "range":
         if not (pos <= RANGE_EXTREME or pos >= (1.0 - RANGE_EXTREME)):
