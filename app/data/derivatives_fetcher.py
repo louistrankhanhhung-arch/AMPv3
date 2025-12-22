@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import time
+import math
+from dataclasses import dataclass
+from typing import Deque, Dict, List, Optional, Tuple
+
 from app.data.cache import TTLCache
 from app.data.models import Derivatives1H
 from app.exchange.base import ExchangeClient
 
+@dataclass(frozen=True)
+class Gate2DerivativesCtx:
+    """
+    Derivatives context for Gate 2 (Regime A/B).
+    Keeps rolling series + computed OI delta and spike score (z-score on OI delta).
+    """
+    symbol: str
+    exchange: str
+    last: Derivatives1H
+    ts: int
+    oi_delta: Optional[float]
+    oi_delta_pct: Optional[float]
+    oi_spike_z: Optional[float]
+    history_len: int
 
 class DerivativesFetcher:
     def __init__(self, client: ExchangeClient, cache: TTLCache) -> None:
@@ -19,3 +38,77 @@ class DerivativesFetcher:
         d = self.client.fetch_derivatives_1h(symbol=symbol)
         self.cache.set(key, d, ttl_sec=ttl_sec)
         return d
+
+    def get_gate2_ctx(
+        self,
+        symbol: str,
+        ttl_sec: int = 30,
+        hist_maxlen: int = 72,
+        z_window: int = 24,
+    ) -> Gate2DerivativesCtx:
+        """
+        Returns a Gate2DerivativesCtx while keeping compatibility with existing pipeline.
+        - Uses get_derivatives_1h() for TTL caching of the latest point.
+        - Stores rolling series in cache persistent storage (in-memory, no TTL).
+        """
+        d = self.get_derivatives_1h(symbol, ttl_sec=ttl_sec)
+        now = int(time.time())
+
+        # Rolling series per exchange+symbol (no TTL)
+        series_key = ("deriv_series_1h", self.client.name, symbol)
+        series = self.cache.get_or_create_deque(series_key, maxlen=hist_maxlen)
+
+        # Append latest point (ts, oi, funding, ratio_long_pct)
+        series.append(
+            {
+                "ts": now,
+                "oi": d.open_interest,
+                "funding": d.funding_rate,
+                "ratio_long_pct": getattr(d, "ratio_long_pct", None),
+            }
+        )
+
+        # Compute OI delta from previous point (best-effort)
+        oi_delta: Optional[float] = None
+        oi_delta_pct: Optional[float] = None
+        if len(series) >= 2:
+            prev = series[-2].get("oi")
+            cur = series[-1].get("oi")
+            if isinstance(prev, (int, float)) and isinstance(cur, (int, float)):
+                oi_delta = float(cur) - float(prev)
+                if prev and prev != 0:
+                    oi_delta_pct = (oi_delta / float(prev)) * 100.0
+
+        # Spike score (z-score) on recent OI deltas
+        oi_spike_z: Optional[float] = None
+        if oi_delta is not None:
+            # build recent deltas
+            deltas: List[float] = []
+            # Use last z_window+1 points to compute deltas
+            pts = list(series)[-(z_window + 1) :]
+            for i in range(1, len(pts)):
+                p = pts[i - 1].get("oi")
+                c = pts[i].get("oi")
+                if isinstance(p, (int, float)) and isinstance(c, (int, float)) and p != 0:
+                    deltas.append(float(c) - float(p))
+
+            # Need enough samples to estimate variance
+            if len(deltas) >= max(8, min(12, z_window // 2)):
+                mean = sum(deltas) / len(deltas)
+                var = sum((x - mean) ** 2 for x in deltas) / max(1, (len(deltas) - 1))
+                std = math.sqrt(var)
+                if std > 1e-12:
+                    oi_spike_z = (oi_delta - mean) / std
+                else:
+                    oi_spike_z = 0.0
+
+        return Gate2DerivativesCtx(
+            symbol=symbol,
+            exchange=self.client.name,
+            last=d,
+            ts=now,
+            oi_delta=oi_delta,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+            history_len=len(series),
+        )
