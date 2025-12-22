@@ -117,5 +117,3 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         oi_delta_pct=oi_delta_pct,
         oi_spike_z=oi_spike_z,
     )
-
-** End Patch
