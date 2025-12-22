@@ -19,9 +19,22 @@ def gate1_htf_clarity(snapshot: MarketSnapshot) -> Gate1Result:
 
     liq = compute_liquidity_targets(snapshot.candles_4h, lookback=80)
 
-    # Rule: avoid mid-range
-    if htf.location == "mid":
-        return Gate1Result(False, "mid_range_4h", htf, liq)
+    # Crypto-friendly location rules:
+    # - If HTF is range: require clear extremes (avoid wide mid).
+    # - If HTF is trending: avoid only the "dead mid" band (narrow), allow edge zones.
+    pos = float(getattr(htf, "pos_pct", 0.5))
+
+    RANGE_EXTREME = 0.30
+    TREND_DEAD_MID_LOW = 0.45
+    TREND_DEAD_MID_HIGH = 0.55
+
+    if htf.bias == "range":
+        if not (pos <= RANGE_EXTREME or pos >= (1.0 - RANGE_EXTREME)):
+            return Gate1Result(False, "mid_range_4h_range_regime", htf, liq)
+    else:
+        # up/down trend regime
+        if TREND_DEAD_MID_LOW < pos < TREND_DEAD_MID_HIGH:
+            return Gate1Result(False, "mid_range_4h_trend_dead_mid", htf, liq)
 
     # Rule: need clarity: trend OR range extreme
     clarity_ok = (htf.bias in ("up", "down")) or (htf.bias == "range" and htf.location in ("discount", "premium"))
