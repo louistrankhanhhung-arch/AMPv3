@@ -1,8 +1,7 @@
-# exchange/base.py
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
-from data.models import Candle, Derivatives1H
+from app.data.models import Candle, Derivatives1H
 
 class ExchangeClient(ABC):
     name: str
