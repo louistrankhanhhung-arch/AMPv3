@@ -58,25 +58,37 @@ class DerivativesFetcher:
         now = int(time.time())
 
         # Rolling series per exchange+symbol (no TTL)
-        series_key = ("deriv_series_1h", self.client.name, symbol)
+        # NOTE: Use a fully-qualified string key to avoid any TTLCache implementations
+        # that may normalize/flatten tuple keys and accidentally share deques across symbols.
+        series_key = f"deriv_series_1h:{self.client.name}:{symbol}"
         series = self.cache.get_or_create_deque(series_key, maxlen=hist_maxlen)
 
         # Append latest point (ts, oi, funding, ratio_long_pct)
         series.append(
             {
                 "ts": now,
+                "exchange": self.client.name,
+                "symbol": symbol,
                 "oi": d.open_interest,
                 "funding": d.funding_rate,
                 "ratio_long_pct": getattr(d, "ratio_long_pct", None),
             }
         )
 
+        # Defensive: filter points to the exact (exchange, symbol) in case a shared deque ever happens.
+        # This guarantees per-symbol z-score outputs even under cache key collisions.
+        pts_all = list(series)
+        pts_sym = [
+            p for p in pts_all
+            if p.get("symbol") == symbol and p.get("exchange") == self.client.name
+        ]
+
         # Compute OI delta from previous point (best-effort)
         oi_delta: Optional[float] = None
         oi_delta_pct: Optional[float] = None
-        if len(series) >= 2:
-            prev = series[-2].get("oi")
-            cur = series[-1].get("oi")
+        if len(pts_sym) >= 2:
+            prev = pts_sym[-2].get("oi")
+            cur = pts_sym[-1].get("oi")
             if isinstance(prev, (int, float)) and isinstance(cur, (int, float)):
                 oi_delta = float(cur) - float(prev)
                 if prev and prev != 0:
@@ -88,7 +100,7 @@ class DerivativesFetcher:
             # build recent deltas
             deltas: List[float] = []
             # Use last z_window+1 points to compute deltas
-            pts = list(series)[-(z_window + 1) :]
+            pts = pts_sym[-(z_window + 1) :]
             for i in range(1, len(pts)):
                 p = pts[i - 1].get("oi")
                 c = pts[i].get("oi")
@@ -110,7 +122,7 @@ class DerivativesFetcher:
         cur_funding = d.funding_rate
         if cur_funding is not None:
             fvals: List[float] = []
-            pts_f = list(series)[-z_window:]
+            pts_f = pts_sym[-z_window:]
             for p in pts_f:
                 fv = p.get("funding")
                 if isinstance(fv, (int, float)):
@@ -131,7 +143,7 @@ class DerivativesFetcher:
             ratio_dev = abs(float(rlp) - 50.0)
 
         # A-mode: only trust Gate 2 when we have enough samples
-        ready = len(series) >= max(12, min(18, z_window))    
+        ready = len(pts_sym) >= max(12, min(18, z_window))    
 
         return Gate2DerivativesCtx(
             symbol=symbol,
@@ -144,5 +156,5 @@ class DerivativesFetcher:
             funding_z=funding_z,
             ratio_dev=ratio_dev,
             ready=ready,
-            history_len=len(series),
+            history_len=len(pts_sym),
         )
