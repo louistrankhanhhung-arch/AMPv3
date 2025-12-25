@@ -99,6 +99,9 @@ class DerivativesFetcher:
 
         # Spike score (z-score) on recent OI deltas
         oi_spike_z: Optional[float] = None
+        # --- DEBUG (temporary) ---
+        oi_mean: Optional[float] = None
+        oi_std: Optional[float] = None
         if oi_delta is not None:
             # build recent deltas
             deltas: List[float] = []
@@ -112,13 +115,29 @@ class DerivativesFetcher:
 
             # Need enough samples to estimate variance
             if len(deltas) >= max(8, min(12, z_window // 2)):
-                mean = sum(deltas) / len(deltas)
-                var = sum((x - mean) ** 2 for x in deltas) / max(1, (len(deltas) - 1))
-                std = math.sqrt(var)
-                if std > 1e-12:
-                    oi_spike_z = (oi_delta - mean) / std
+                oi_mean = sum(deltas) / len(deltas)
+                var = sum((x - oi_mean) ** 2 for x in deltas) / max(1, (len(deltas) - 1))
+                oi_std = math.sqrt(var)
+                if oi_std > 1e-12:
+                    oi_spike_z = (oi_delta - oi_mean) / oi_std
                 else:
                     oi_spike_z = 0.0
+
+                # --- DEBUG: per-symbol OI delta distribution (temporary) ---
+                try:
+                    last3d = deltas[-3:]
+                    logger.debug(
+                        "G2_OI_STATS | %s | mean=%+.3e std=%.3e cur_d=%+.3e z=%+.3f last3=%s n=%d",
+                        symbol,
+                        float(oi_mean),
+                        float(oi_std),
+                        float(oi_delta),
+                        float(oi_spike_z) if oi_spike_z is not None else float("nan"),
+                        [float(f"{x:+.3e}") for x in last3d],
+                        len(deltas),
+                    )
+                except Exception:
+                    pass
 
         # Funding z-score (best-effort) on recent funding samples
         funding_z: Optional[float] = None
@@ -143,12 +162,13 @@ class DerivativesFetcher:
                 try:
                     last3 = fvals[-3:]
                     logger.debug(
-                        "G2_FUNDING_STATS | %s | fmean=%.8f fstd=%.8f cur=%.8f last3=%s n=%d",
+                        "G2_FUNDING_STATS | %s | mean=%+.3e std=%.3e cur=%+.3e fz=%+.3f last3=%s n=%d",
                         symbol,
-                        fmean,
-                        fstd,
+                        float(fmean),
+                        float(fstd),
                         float(cur_funding),
-                        [round(x, 8) for x in last3],
+                        float(funding_z) if funding_z is not None else float("nan"),
+                        [float(f"{x:+.3e}") for x in last3],
                         len(fvals),
                     )
                 except Exception:
