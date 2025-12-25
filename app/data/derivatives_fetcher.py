@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import logging
 import math
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
@@ -8,6 +9,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 from app.data.cache import TTLCache
 from app.data.models import Derivatives1H
 from app.exchange.base import ExchangeClient
+
+logger = logging.getLogger("amp_smc")
 
 @dataclass(frozen=True)
 class Gate2DerivativesCtx:
@@ -135,6 +138,21 @@ class DerivativesFetcher:
                     funding_z = (float(cur_funding) - fmean) / fstd
                 else:
                     funding_z = 0.0
+
+                # --- DEBUG: per-symbol funding distribution (temporary) ---
+                try:
+                    last3 = fvals[-3:]
+                    logger.debug(
+                        "G2_FUNDING_STATS | %s | fmean=%.8f fstd=%.8f cur=%.8f last3=%s n=%d",
+                        symbol,
+                        fmean,
+                        fstd,
+                        float(cur_funding),
+                        [round(x, 8) for x in last3],
+                        len(fvals),
+                    )
+                except Exception:
+                    pass
 
         # Ratio deviation from 50 (%). Useful for crowding checks.
         ratio_dev: Optional[float] = None
