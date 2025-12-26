@@ -12,12 +12,42 @@ class Gate2Result:
     passed: bool
     reason: str
     regime: str  # "healthy_trend" | "crowded_squeeze" | "neutral"
+    directional_bias_hint: str  # continuation/reversal preference hint (v1)
+    confidence: str             # "HIGH"|"MED"|"LOW"
+    confirm4h: bool
+    confirm4h_reason: str
+    ratio_skew: Optional[str]   # "LONG"|"SHORT"|None
+    funding_extreme: bool
+    oi_spike: bool
     ratio_long_pct: Optional[float]
     funding: Optional[float]
     funding_z: Optional[float]
     oi_delta_pct: Optional[float]
     oi_spike_z: Optional[float]
+    oi_slope_4h_pct: Optional[float]
 
+def _ratio_skew(rlp: Optional[float]) -> Optional[str]:
+    if not isinstance(rlp, (int, float)):
+        return None
+    x = float(rlp)
+    if x >= 65.0:
+        return "LONG"
+    if x <= 35.0:
+        return "SHORT"
+    return None
+
+
+def _directional_hint(regime: str, skew: Optional[str]) -> str:
+    # v1 hint without Gate1 HTF bias: keep generic but actionable
+    if regime == "healthy_trend":
+        return "continuation_preferred"
+    if regime == "crowded_squeeze":
+        if skew == "LONG":
+            return "reversal_or_flush_risk"
+        if skew == "SHORT":
+            return "reversal_or_squeeze_up_risk"
+        return "squeeze_risk"
+    return "no_trade"
 
 def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx) -> Gate2Result:
     """
@@ -26,17 +56,20 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     """
     rlp = getattr(ctx.last, "ratio_long_pct", None)
     funding = ctx.last.funding_rate
-    # --- Funding z-score (fix) ---
-    # Prefer recomputing from rolling mean/std if available on ctx to avoid sign/abs bugs.
-    # Falls back to ctx.funding_z if stats are not provided.
+    # --- Funding z-score (Option 2 fix) ---
+    # Prefer recomputing from rolling mean/std on ctx; fallback to ctx.funding_z.
     funding_z = getattr(ctx, "funding_z", None)
-    _mu = getattr(ctx, "funding_mean", None)
+    funding_z = getattr(ctx, "funding_z", None)
+     _mu = getattr(ctx, "funding_mean", None)
     _sd = getattr(ctx, "funding_std", None)
     if isinstance(funding, (int, float)) and isinstance(_mu, (int, float)) and isinstance(_sd, (int, float)):
         if float(_sd) > 0.0:
             funding_z = (float(funding) - float(_mu)) / float(_sd)
     oi_delta_pct = ctx.oi_delta_pct
     oi_spike_z = ctx.oi_spike_z
+    oi_slope_4h_pct = getattr(ctx, "oi_slope_4h_pct", None)
+    confirm4h = bool(getattr(ctx, "confirm4h", False))
+    confirm4h_reason = str(getattr(ctx, "confirm4h_reason", "na"))
 
     # --- A-mode hard guards (work even when rolling history is insufficient) ---
     # Goal: allow "crowded_squeeze" classification immediately if risk is obvious,
@@ -57,6 +90,19 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     if isinstance(oi_spike_z, (int, float)):
         hard_oi_spike = float(oi_spike_z) >= 3.0  # hard threshold
 
+    ratio_skew = _ratio_skew(rlp)
+    oi_spike = bool(hard_oi_spike)
+    funding_extreme = bool(hard_extreme_funding)
+
+    # confidence for hard-guard path
+    confidence = "LOW"
+    if ctx.ready:
+        confidence = "MED"
+        if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
+            confidence = "HIGH"
+        if confirm4h and confidence != "HIGH":
+            confidence = "MED"
+
     hard_hits = int(hard_crowded_ratio) + int(hard_extreme_funding) + int(hard_oi_spike)
     if hard_hits >= 2:
         # Provide the most informative reason for logs
@@ -72,11 +118,19 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             passed=True,
             reason=reason,
             regime="crowded_squeeze",
+            directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
+            confidence=confidence,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=funding_extreme,
+            oi_spike=oi_spike,
             ratio_long_pct=rlp,
             funding=funding,
             funding_z=funding_z,
             oi_delta_pct=oi_delta_pct,
             oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
     if not ctx.ready:
@@ -84,11 +138,19 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             passed=False,
             reason=f"insufficient_history_{ctx.history_len}",
             regime="neutral",
+            directional_bias_hint=_directional_hint("neutral", ratio_skew),
+            confidence="LOW",
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=False,
+            oi_spike=False,
             ratio_long_pct=rlp,
             funding=funding,
             funding_z=funding_z,
             oi_delta_pct=oi_delta_pct,
             oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
     # --- Crowded / Squeeze risk (Regime B) ---
@@ -109,9 +171,16 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     if isinstance(oi_spike_z, (int, float)):
         oi_spike = float(oi_spike_z) >= 2.5
 
+    # Confidence upgrade when 4H confirm is present (v1)
+    confidence = "MED"
+    if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
+        confidence = "HIGH"
+    if not confirm4h and confidence == "HIGH":
+        confidence = "MED"
+
     # A-mode: crowded_squeeze must be 2/3 (ratio + funding + oi_spike)
     squeeze_hits = int(crowded_ratio) + int(extreme_funding) + int(oi_spike)
-    if squeeze_hits >= 2:
+    if squeeze_hits >= 2 and (confirm4h or squeeze_hits == 3):
         # Prefer the most actionable reason for downstream logic/logging
         if oi_spike and extreme_funding:
             reason = "funding_extreme_oi_spike"
@@ -129,11 +198,19 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             passed=True,
             reason=reason,
             regime="crowded_squeeze",
+            directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
+            confidence=confidence,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
             ratio_long_pct=rlp,
             funding=funding,
             funding_z=funding_z,
             oi_delta_pct=oi_delta_pct,
             oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
     # --- Healthy Trend (Regime A) ---
@@ -154,24 +231,43 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         oi_ok = float(oi_spike_z) < 2.0
 
     if ratio_ok and funding_ok and oi_ok:
+        confidence = "MED"
+        if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
+            confidence = "HIGH"
         return Gate2Result(
             passed=True,
             reason="pass",
             regime="healthy_trend",
+            directional_bias_hint=_directional_hint("healthy_trend", ratio_skew),
+            confidence=confidence,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
             ratio_long_pct=rlp,
             funding=funding,
             funding_z=funding_z,
             oi_delta_pct=oi_delta_pct,
             oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
     return Gate2Result(
         passed=False,
         reason="neutral",
         regime="neutral",
+        directional_bias_hint=_directional_hint("neutral", ratio_skew),
+        confidence="MED" if ctx.ready else "LOW",
+        confirm4h=confirm4h,
+        confirm4h_reason=confirm4h_reason,
+        ratio_skew=ratio_skew,
+        funding_extreme=bool(extreme_funding),
+        oi_spike=bool(oi_spike),
         ratio_long_pct=rlp,
         funding=funding,
         funding_z=funding_z,
         oi_delta_pct=oi_delta_pct,
         oi_spike_z=oi_spike_z,
+        oi_slope_4h_pct=oi_slope_4h_pct,
     )
