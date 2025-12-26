@@ -60,7 +60,7 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     # Prefer recomputing from rolling mean/std on ctx; fallback to ctx.funding_z.
     funding_z = getattr(ctx, "funding_z", None)
     funding_z = getattr(ctx, "funding_z", None)
-     _mu = getattr(ctx, "funding_mean", None)
+    _mu = getattr(ctx, "funding_mean", None)
     _sd = getattr(ctx, "funding_std", None)
     if isinstance(funding, (int, float)) and isinstance(_mu, (int, float)) and isinstance(_sd, (int, float)):
         if float(_sd) > 0.0:
