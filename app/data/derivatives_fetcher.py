@@ -40,6 +40,114 @@ class DerivativesFetcher:
     def __init__(self, client: ExchangeClient, cache: TTLCache) -> None:
         self.client = client
         self.cache = cache
+        # --- Persistence for derivatives rolling series (fix restart history loss) ---
+        # Set AMP_DERIV_DB_PATH to a persistent volume path on Railway for true durability.
+        self._db_path = os.getenv("AMP_DERIV_DB_PATH", "amp_smc.sqlite")
+        self._db_ready = False
+        self._ensure_db()
+
+    # -------------------------
+    # SQLite persistence helpers
+    # -------------------------
+    def _ensure_db(self) -> None:
+        if self._db_ready:
+            return
+        try:
+            con = sqlite3.connect(self._db_path)
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS deriv_series_1h (
+                      exchange TEXT NOT NULL,
+                      symbol   TEXT NOT NULL,
+                      bucket_ts INTEGER NOT NULL,
+                      ts INTEGER NOT NULL,
+                      oi REAL,
+                      funding REAL,
+                      ratio_long_pct REAL,
+                      PRIMARY KEY (exchange, symbol, bucket_ts)
+                    )
+                    """
+                )
+                con.commit()
+                self._db_ready = True
+            finally:
+                con.close()
+        except Exception as e:
+            # Do not crash engine if DB path is not writable; fallback to in-memory only.
+            logger.warning("DERIV_DB_INIT_FAIL | path=%s | err=%s", self._db_path, e)
+            self._db_ready = False
+
+    def _load_persisted_points(self, exchange: str, symbol: str, limit: int) -> List[dict]:
+        if not self._db_ready:
+            return []
+        try:
+            con = sqlite3.connect(self._db_path)
+            try:
+                cur = con.execute(
+                    """
+                    SELECT ts, bucket_ts, oi, funding, ratio_long_pct
+                    FROM deriv_series_1h
+                    WHERE exchange = ? AND symbol = ?
+                    ORDER BY bucket_ts DESC
+                    LIMIT ?
+                    """,
+                    (exchange, symbol, int(limit)),
+                )
+                rows = cur.fetchall()
+            finally:
+                con.close()
+            # return ascending by bucket_ts for correct time order
+            pts: List[dict] = []
+            for ts, bucket_ts, oi, funding, ratio_long_pct in reversed(rows):
+                pts.append(
+                    {
+                        "ts": int(ts),
+                        "bucket_ts": int(bucket_ts),
+                        "exchange": exchange,
+                        "symbol": symbol,
+                        "oi": float(oi) if oi is not None else None,
+                        "funding": float(funding) if funding is not None else None,
+                        "ratio_long_pct": float(ratio_long_pct) if ratio_long_pct is not None else None,
+                    }
+                )
+            return pts
+        except Exception as e:
+            logger.warning("DERIV_DB_LOAD_FAIL | ex=%s sym=%s err=%s", exchange, symbol, e)
+            return []
+
+    def _upsert_point(self, p: dict) -> None:
+        if not self._db_ready:
+            return
+        try:
+            con = sqlite3.connect(self._db_path)
+            try:
+                con.execute(
+                    """
+                    INSERT INTO deriv_series_1h (exchange, symbol, bucket_ts, ts, oi, funding, ratio_long_pct)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(exchange, symbol, bucket_ts) DO UPDATE SET
+                      ts = excluded.ts,
+                      oi = excluded.oi,
+                      funding = excluded.funding,
+                      ratio_long_pct = excluded.ratio_long_pct
+                    """,
+                    (
+                        str(p.get("exchange")),
+                        str(p.get("symbol")),
+                        int(p.get("bucket_ts")),
+                        int(p.get("ts")),
+                        float(p.get("oi")) if isinstance(p.get("oi"), (int, float)) else None,
+                        float(p.get("funding")) if isinstance(p.get("funding"), (int, float)) else None,
+                        float(p.get("ratio_long_pct")) if isinstance(p.get("ratio_long_pct"), (int, float)) else None,
+                    ),
+                )
+                con.commit()
+            finally:
+                con.close()
+        except Exception as e:
+            # Non-fatal: keep running without persistence
+            logger.warning("DERIV_DB_UPSERT_FAIL | ex=%s sym=%s err=%s", p.get("exchange"), p.get("symbol"), e)
 
     def get_derivatives_1h(self, symbol: str, ttl_sec: int = 30) -> Derivatives1H:
         key = ("deriv_1h", self.client.name, symbol)
@@ -74,6 +182,22 @@ class DerivativesFetcher:
         series_key = f"deriv_series_1h:{self.client.name}:{symbol}"
         series = self.cache.get_or_create_deque(series_key, maxlen=hist_maxlen)
 
+        # --- NEW: bootstrap deque from persisted DB on cold start/restart ---
+        # If engine restarted, in-memory deque is empty. Load last hist_maxlen points from DB once.
+        if len(series) == 0:
+            persisted = self._load_persisted_points(self.client.name, symbol, limit=hist_maxlen)
+            if persisted:
+                try:
+                    for p in persisted:
+                        series.append(p)
+                    logger.info(
+                        "DERIV_SERIES_BOOTSTRAP | %s | loaded=%d | ex=%s",
+                        symbol, len(persisted), self.client.name
+                    )
+                except Exception:
+                    # If deque rejects appends for any reason, just continue without bootstrap.
+                    pass
+
         # Append at most once per 1H bucket (dedup).
         # If bucket already exists, keep the latest observation for that bucket.
         last_point = series[-1] if len(series) > 0 else None
@@ -103,6 +227,9 @@ class DerivativesFetcher:
             except Exception:
                 # Fallback: append if deque does not support item assignment (shouldn't happen)
                 series.append(point)
+
+        # --- NEW: persist point (upsert by bucket_ts) ---
+        self._upsert_point(point)
 
         # Defensive: filter points to the exact (exchange, symbol) in case a shared deque ever happens.
         # This guarantees per-symbol z-score outputs even under cache key collisions.
@@ -189,7 +316,8 @@ class DerivativesFetcher:
                 funding_mean = sum(fvals) / len(fvals)
                 fvar = sum((x - funding_mean) ** 2 for x in fvals) / max(1, (len(fvals) - 1))
                 funding_std = math.sqrt(fvar)
-                if funding_std > 1e-12:
+                # Guard against tiny std (numeric blow-ups)
+                if funding_std > 1e-8:
                     funding_z = (float(cur_funding) - funding_mean) / funding_std
                 else:
                     funding_z = 0.0
