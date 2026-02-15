@@ -59,12 +59,22 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     # --- Funding z-score (Option 2 fix) ---
     # Prefer recomputing from rolling mean/std on ctx; fallback to ctx.funding_z.
     funding_z = getattr(ctx, "funding_z", None)
-    funding_z = getattr(ctx, "funding_z", None)
     _mu = getattr(ctx, "funding_mean", None)
     _sd = getattr(ctx, "funding_std", None)
     if isinstance(funding, (int, float)) and isinstance(_mu, (int, float)) and isinstance(_sd, (int, float)):
-        if float(_sd) > 0.0:
-            funding_z = (float(funding) - float(_mu)) / float(_sd)
+        # Guard against tiny std (numeric blow-ups) + clamp to reduce outlier noise
+        sd = float(_sd)
+        if sd >= 1e-8:
+            funding_z = (float(funding) - float(_mu)) / sd
+        else:
+            funding_z = 0.0
+    if isinstance(funding_z, (int, float)):
+        # Clamp z-score to avoid rare spikes dominating classification
+        z = float(funding_z)
+        if z > 6.0:
+            funding_z = 6.0
+        elif z < -6.0:
+            funding_z = -6.0
     oi_delta_pct = ctx.oi_delta_pct
     oi_spike_z = ctx.oi_spike_z
     oi_slope_4h_pct = getattr(ctx, "oi_slope_4h_pct", None)
@@ -234,6 +244,9 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         confidence = "MED"
         if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
             confidence = "HIGH"
+        # In healthy_trend, these should reflect "not overheated" by definition
+        healthy_funding_extreme = not bool(funding_ok)
+        healthy_oi_spike = not bool(oi_ok)
         return Gate2Result(
             passed=True,
             reason="pass",
@@ -243,8 +256,8 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             confirm4h=confirm4h,
             confirm4h_reason=confirm4h_reason,
             ratio_skew=ratio_skew,
-            funding_extreme=bool(extreme_funding),
-            oi_spike=bool(oi_spike),
+            funding_extreme=bool(healthy_funding_extreme),
+            oi_spike=bool(healthy_oi_spike),
             ratio_long_pct=rlp,
             funding=funding,
             funding_z=funding_z,
