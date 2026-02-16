@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import sqlite3
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Deque, Dict, List, Optional, Tuple
 
@@ -47,6 +48,17 @@ class DerivativesFetcher:
         self._db_path = os.getenv("AMP_DERIV_DB_PATH", "amp_smc.sqlite")
         self._db_ready = False
         self._ensure_db()
+        try:
+            p = Path(self._db_path)
+            logger.info(
+                "DERIV_DB | ready=%s | path=%s | cwd=%s | exists=%s",
+                int(self._db_ready),
+                str(p),
+                os.getcwd(),
+                int(p.exists()),
+            )
+        except Exception:
+            pass
 
     # -------------------------
     # SQLite persistence helpers
@@ -188,14 +200,18 @@ class DerivativesFetcher:
         # If engine restarted, in-memory deque is empty. Load last hist_maxlen points from DB once.
         if len(series) == 0:
             persisted = self._load_persisted_points(self.client.name, symbol, limit=hist_maxlen)
+            logger.info(
+                "DERIV_SERIES_BOOTSTRAP | %s | loaded=%d | ex=%s | db_ready=%s | db_path=%s",
+                symbol,
+                len(persisted),
+                self.client.name,
+                int(self._db_ready),
+                self._db_path,
+            )
             if persisted:
                 try:
                     for p in persisted:
                         series.append(p)
-                    logger.info(
-                        "DERIV_SERIES_BOOTSTRAP | %s | loaded=%d | ex=%s",
-                        symbol, len(persisted), self.client.name
-                    )
                 except Exception:
                     # If deque rejects appends for any reason, just continue without bootstrap.
                     pass
