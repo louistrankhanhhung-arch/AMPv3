@@ -23,12 +23,26 @@ def gate1_htf_clarity(snapshot: MarketSnapshot) -> Gate1Result:
     sp = snapshot.spread_pct
     if sp is not None:
         sym = snapshot.symbol.upper()
-        if sym in ("BTCUSDT", "ETHUSDT"):
-            if sp > 0.01:
-                return Gate1Result(False, "spread_too_wide_core", htf, liq)
+        # NOTE: spread_pct is in percent units (e.g., 0.10 = 0.10%).
+        CORE = {"BTCUSDT", "ETHUSDT"}
+        MAJORS = {"BNBUSDT", "SOLUSDT"}
+        LOW_PRICE_ALTS = {"ARBUSDT", "NEARUSDT"}  # more wick-prone, allow a bit wider
+
+        if sym in CORE:
+            max_sp = 0.02   # 0.02% (2 bps)
+            tag = "core"
+        elif sym in MAJORS:
+            max_sp = 0.06   # 0.06% (6 bps)
+            tag = "major"
+        elif sym in LOW_PRICE_ALTS:
+            max_sp = 0.25   # 0.25% (25 bps)
+            tag = "alt_low_price"
         else:
-            if sp > 0.05:
-                return Gate1Result(False, "spread_too_wide_alt", htf, liq)
+            max_sp = 0.15   # 0.15% (15 bps) default for mid alts
+            tag = "alt"
+
+        if sp > max_sp:
+            return Gate1Result(False, f"spread_too_wide_{tag}", htf, liq)
 
     # Crypto-friendly location rules:
     # - If HTF is range: require clear extremes (avoid wide mid).
