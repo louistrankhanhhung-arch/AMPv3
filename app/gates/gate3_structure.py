@@ -43,6 +43,93 @@ def _atr(candles, n: int = 14) -> Optional[float]:
         return None
     return sum(trs) / len(trs)
 
+def _fractal_swings_generic(candles, left: int = 2, right: int = 2):
+    """
+    Generic fractal swings for any timeframe candles:
+    - swing high if candle.h is max within [i-left, i+right]
+    - swing low if candle.l is min within [i-left, i+right]
+    Returns list of (idx, kind, price).
+    """
+    n = len(candles) if candles else 0
+    if n < left + right + 8:
+        return []
+    swings = []
+    for i in range(left, n - right):
+        window = candles[i - left : i + right + 1]
+        hi = candles[i].h
+        lo = candles[i].l
+        if hi == max(c.h for c in window):
+            swings.append((i, "H", float(hi)))
+        if lo == min(c.l for c in window):
+            swings.append((i, "L", float(lo)))
+    return swings
+
+
+def _micro_confirm_15m(
+    candles_15m,
+    intent: str,
+    lookback: int = 48,            # 12h (48 x 15m)
+    min_break_atr_mult: float = 0.10,  # CHoCH break must exceed level by >= 0.10 * ATR(14)
+) -> tuple[bool, str]:
+    """
+    Micro-confirm v0 (15m):
+    LONG:
+      1) Sweep: low pierces last swing low, but close reclaims above it.
+      2) CHoCH: after sweep, close breaks above last swing high (with small ATR buffer).
+    SHORT: symmetric.
+    """
+    if not candles_15m or len(candles_15m) < 80:
+        return False, "insufficient_15m_candles"
+
+    c = candles_15m[-lookback:] if len(candles_15m) > lookback else candles_15m
+    atr15 = _atr(c, 14)
+    buf = (atr15 * min_break_atr_mult) if (atr15 is not None and atr15 > 0) else 0.0
+
+    swings = _fractal_swings_generic(c, left=2, right=2)
+    highs = [(i, p) for (i, k, p) in swings if k == "H"]
+    lows = [(i, p) for (i, k, p) in swings if k == "L"]
+    if len(highs) < 2 or len(lows) < 2:
+        return False, "insufficient_15m_swings"
+
+    last_high_i, last_high = highs[-1]
+    last_low_i, last_low = lows[-1]
+
+    # Sweep scan: find first sweep event in the recent window, then validate CHoCH after it.
+    sweep_idx = None
+    if intent == "LONG":
+        # Need a recent swing low (use last_low) and reclaim close
+        for i in range(max(0, last_low_i), len(c)):
+            if float(c[i].l) < last_low and float(c[i].c) > (last_low + buf):
+                sweep_idx = i
+                break
+        if sweep_idx is None:
+            return False, "no_sweep_15m"
+        # CHoCH up: close breaks above last swing high after sweep
+        # Recompute "relevant" swing high as the latest high BEFORE sweep
+        prev_highs = [(i, p) for (i, p) in highs if i < sweep_idx]
+        if not prev_highs:
+            return False, "no_prev_swing_high"
+        ref_high_i, ref_high = prev_highs[-1]
+        for j in range(sweep_idx + 1, len(c)):
+            if float(c[j].c) > (ref_high + buf):
+                return True, "micro_sweep_choch_up"
+        return False, "no_choch_15m"
+
+    # SHORT
+    for i in range(max(0, last_high_i), len(c)):
+        if float(c[i].h) > last_high and float(c[i].c) < (last_high - buf):
+            sweep_idx = i
+            break
+    if sweep_idx is None:
+        return False, "no_sweep_15m"
+    prev_lows = [(i, p) for (i, p) in lows if i < sweep_idx]
+    if not prev_lows:
+        return False, "no_prev_swing_low"
+    ref_low_i, ref_low = prev_lows[-1]
+    for j in range(sweep_idx + 1, len(c)):
+        if float(c[j].c) < (ref_low - buf):
+            return True, "micro_sweep_choch_down"
+    return False, "no_choch_15m"
 
 def _pick_intent(g1: Gate1Result) -> Optional[str]:
     """
@@ -220,6 +307,22 @@ def gate3_structure_confirmation_v0(
             intent=intent,
         )
 
+    # Micro-confirm (15m): sweep -> internal CHoCH
+    micro_ok, micro_reason = _micro_confirm_15m(snapshot.candles_15m, intent=intent, lookback=48, min_break_atr_mult=0.10)
+    if not micro_ok:
+        return Gate3Result(
+            passed=False,
+            reason="micro_confirm_fail",
+            structure=structure,
+            zone=zone,
+            rr_tp2=None,
+            entry=None,
+            sl=None,
+            tp2=None,
+            notes={"micro_reason": micro_reason, "intent": intent},
+            intent=intent,
+        )
+
     # Entry: use zone edge closer to current price (more realistic than pure mid)
     mark = float(getattr(snapshot, "mark", getattr(snapshot, "mark_price", 0.0)) or 0.0)
     top = float(zone.top)
@@ -298,6 +401,7 @@ def gate3_structure_confirmation_v0(
             "zone_kind": zone.kind,
             "zone_fill": f"{zone.fill_pct:.2f}",
             "intent": intent,
+            "micro": micro_reason,
         },
         intent=intent,
     )
