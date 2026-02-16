@@ -58,6 +58,9 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     rlp = getattr(ctx.last, "ratio_long_pct", None)
     funding = ctx.last.funding_rate
     # --- Funding z-score (Option 2 fix) ---
+    funding_z: Optional[float] = None
+    # fallback to ctx value if present
+    funding_z = getattr(ctx, "funding_z", None)
     # Prefer recomputing from rolling mean/std on ctx; fallback to ctx.funding_z.
     _mu = getattr(ctx, "funding_mean", None)
     _sd = getattr(ctx, "funding_std", None)
