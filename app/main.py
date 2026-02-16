@@ -13,6 +13,7 @@ from app.data.models import MarketSnapshot, Derivatives1H
 
 from app.gates.gate1_htf import gate1_htf_clarity
 from app.gates.gate2_derivatives import gate2_derivatives_regime
+from app.gates.gate3_structure import gate3_structure_confirmation_v0
 
 
 def build_snapshot(
@@ -83,12 +84,7 @@ def main() -> None:
 
                 # Build snapshot reusing derivatives from ctx2 (single fetch source-of-truth)
                 snap = build_snapshot(sym, market, deriv, client, d1h=ctx2.last)
-
-                # --- IMPORTANT: Always update/persist derivatives rolling series ---
-                # Do this BEFORE Gate 1 so history accumulates even when Gate 1 fails.
-                # This fixes "restart -> hist=1" syndrome and makes Gate 2 ready faster.
-                ctx2 = deriv.get_gate2_ctx(sym, ttl_sec=30)
-
+                
                 # Tầng 1: chỉ log để kiểm tra pipeline.
                 # Tầng 2 trở đi sẽ gọi gates/smc và notify.
                 log.info(
@@ -138,6 +134,21 @@ def main() -> None:
                         getattr(g2, "oi_delta_pct", None),
                         getattr(g2, "oi_spike_z", None),
                         getattr(ctx2, "history_len", None),
+                    )
+
+                    # Tầng 4 - Gate 3 (v0): Structure Confirmation (SMC)
+                    # NOTE: Gate3 is fail-closed; it will refuse trade if Gate2 not trade-eligible.
+                    g3 = gate3_structure_confirmation_v0(snap, g1, g2)
+                    log.info(
+                        "G3 %s %s | reason=%s | rr_tp2=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                        snap.symbol,
+                        "PASS" if g3.passed else "FAIL",
+                        getattr(g3, "reason", None),
+                        getattr(g3, "rr_tp2", None),
+                        (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
+                        (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
+                        (getattr(g3.structure, "trend", None) if getattr(g3, "structure", None) else None),
+                        (getattr(g3.structure, "break_level", None) if getattr(g3, "structure", None) else None),
                     )
 
             time.sleep(cfg.scan_interval_sec)
