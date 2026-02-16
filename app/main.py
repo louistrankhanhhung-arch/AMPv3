@@ -9,18 +9,26 @@ from app.exchange.router import ExchangeRouter
 from app.data.cache import TTLCache
 from app.data.market_fetcher import MarketFetcher
 from app.data.derivatives_fetcher import DerivativesFetcher
-from app.data.models import MarketSnapshot
+from app.data.models import MarketSnapshot, Derivatives1H
 
 from app.gates.gate1_htf import gate1_htf_clarity
 from app.gates.gate2_derivatives import gate2_derivatives_regime
 
 
-def build_snapshot(symbol: str, market: MarketFetcher, deriv: DerivativesFetcher, client) -> MarketSnapshot:
+def build_snapshot(
+    symbol: str,
+    market: MarketFetcher,
+    deriv: DerivativesFetcher,
+    client,
+    d1h: Optional[Derivatives1H] = None,
+) -> MarketSnapshot:
     candles_15m = market.get_candles(symbol, "15m", limit=240, ttl_sec=20)
     candles_1h = market.get_candles(symbol, "1h", limit=240, ttl_sec=40)
     candles_4h = market.get_candles(symbol, "4h", limit=240, ttl_sec=90)
 
-    d1h = deriv.get_derivatives_1h(symbol, ttl_sec=30)
+    # Reuse derivatives snapshot if already fetched (avoid double-fetch / rate-limit risk)
+    if d1h is None:
+        d1h = deriv.get_derivatives_1h(symbol, ttl_sec=30)
 
     mark = client.fetch_mark_price(symbol)
     spread = client.fetch_spread_bps(symbol)
@@ -69,7 +77,12 @@ def main() -> None:
             deriv = DerivativesFetcher(client, cache)
 
             for sym in cfg.symbols:
-                snap = build_snapshot(sym, market, deriv, client)
+                # Always warm-up + persist derivatives rolling series BEFORE Gate 1
+                # so Gate2 becomes restart-proof and does not depend on G1 pass.
+                ctx2 = deriv.get_gate2_ctx(sym, ttl_sec=30)
+
+                # Build snapshot reusing derivatives from ctx2 (single fetch source-of-truth)
+                snap = build_snapshot(sym, market, deriv, client, d1h=ctx2.last)
 
                 # --- IMPORTANT: Always update/persist derivatives rolling series ---
                 # Do this BEFORE Gate 1 so history accumulates even when Gate 1 fails.
@@ -113,11 +126,12 @@ def main() -> None:
                 if g1.passed:
                     g2 = gate2_derivatives_regime(snap, ctx2)
                     log.info(
-                        "G2 %s %s | reason=%s regime=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | hist=%s",
+                        "G2 %s %s | reason=%s regime=%s | alert_only=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | hist=%s",
                         snap.symbol,
                         "PASS" if g2.passed else "FAIL",
                         getattr(g2, "reason", None),
                         getattr(g2, "regime", None),
+                        getattr(g2, "alert_only", False),
                         getattr(g2, "ratio_long_pct", None),
                         getattr(g2, "funding", None),
                         getattr(g2, "funding_z", None),
