@@ -138,6 +138,9 @@ def _micro_confirm_pullback_break_15m(
     lookback: int = 64,               # 16h
     min_break_atr_mult: float = 0.10, # internal break buffer
     max_zone_fill_pct: float = 0.55,  # don't accept deep mitigation
+    require_accept_closes: int = 2,   # NEW: consecutive closes for acceptance
+    accept_lookahead: int = 16,       # NEW: how far after touch to look for acceptance (~4h)
+    strong_disp: bool = False,        # NEW: hybrid relax acceptance if strong displacement
 ) -> tuple[bool, str]:
     """
     Micro-confirm mode 2 (continuation):
@@ -167,6 +170,7 @@ def _micro_confirm_pullback_break_15m(
     bot = float(zone.bottom)
     if top < bot:
         top, bot = bot, top
+    mid = (top + bot) / 2.0
 
     # Detect first touch into zone (mitigation)
     touch_idx = None
@@ -184,6 +188,34 @@ def _micro_confirm_pullback_break_15m(
 
     if touch_idx is None:
         return False, "no_pullback_into_zone"
+
+    # NEW: 2 closes acceptance after touch (avoid wick-only "touch giả")
+    # LONG: require consecutive closes >= zone_mid
+    # SHORT: require consecutive closes <= zone_mid
+    acc_needed = int(require_accept_closes) if require_accept_closes is not None else 0
+    # HYBRID: if strong displacement on 1H, accept faster (1 close)
+    if strong_disp and acc_needed > 1:
+        acc_needed = 1
+    if acc_needed > 0:
+        acc = 0
+        acc_start = None
+        end = min(len(c), touch_idx + 1 + int(accept_lookahead))
+        for i in range(touch_idx + 1, end):
+            cl = float(c[i].c)
+            ok = (cl >= mid) if intent == "LONG" else (cl <= mid)
+            if ok:
+                acc += 1
+                if acc_start is None:
+                    acc_start = i
+                if acc >= acc_needed:
+                    # acceptance achieved; internal break should happen AFTER this point
+                    touch_idx = i
+                    break
+            else:
+                acc = 0
+                acc_start = None
+        if acc < acc_needed:
+            return False, f"no_acceptance_{acc_needed}_closes"
 
     # Internal break after touch: use latest swing levels before touch as reference
     swings = _fractal_swings_generic(c, left=2, right=2)
@@ -258,6 +290,18 @@ def _has_displacement(candles_1h, atr_mult: float = 0.8) -> bool:
     body = abs(float(last.c) - float(last.o))
     return body >= atr_mult * a
 
+def _strong_displacement_1h(candles_1h, strong_mult: float = 1.2) -> bool:
+    """
+    Strong displacement proxy:
+      last candle body >= strong_mult * ATR(14)
+    Used to relax acceptance requirement (hybrid mode).
+    """
+    a = _atr(candles_1h, 14)
+    if a is None or a <= 0:
+        return False
+    last = candles_1h[-1]
+    body = abs(float(last.c) - float(last.o))
+    return body >= strong_mult * a
 
 def _pick_zone(zones: List[Zone], intent: str) -> Optional[Zone]:
     """
@@ -386,6 +430,9 @@ def gate3_structure_confirmation_v0(
             intent=intent,
         )
 
+    # HYBRID flag: strong displacement => relax acceptance rule in mode2
+    strong_disp = _strong_displacement_1h(snapshot.candles_1h, strong_mult=1.2)
+
     zones = find_fvg_15m(snapshot.candles_15m, lookback=120)
     # Directional zone filter: must match intent and not deeply filled
     zone = _pick_zone(zones, intent=intent)
@@ -412,6 +459,7 @@ def gate3_structure_confirmation_v0(
             zone=zone,
             lookback=64,
             min_break_atr_mult=0.10,
+            strong_disp=strong_disp,
         )
     else:
         micro_ok, micro_reason = _micro_confirm_15m(
@@ -430,7 +478,7 @@ def gate3_structure_confirmation_v0(
             entry=None,
             sl=None,
             tp2=None,
-            notes={"micro_reason": micro_reason, "micro_mode": micro_mode, "intent": intent},
+            notes={"micro_reason": micro_reason, "micro_mode": micro_mode, "intent": intent, "strong_disp": str(strong_disp)},
             intent=intent,
         )
 
@@ -514,6 +562,7 @@ def gate3_structure_confirmation_v0(
             "intent": intent,
             "micro": micro_reason,
             "micro_mode": micro_mode,
+            "strong_disp": str(strong_disp),
         },
         intent=intent,
     )
