@@ -131,6 +131,102 @@ def _micro_confirm_15m(
             return True, "micro_sweep_choch_down"
     return False, "no_choch_15m"
 
+def _micro_confirm_pullback_break_15m(
+    candles_15m,
+    intent: str,
+    zone: Zone,
+    lookback: int = 64,               # 16h
+    min_break_atr_mult: float = 0.10, # internal break buffer
+    max_zone_fill_pct: float = 0.55,  # don't accept deep mitigation
+) -> tuple[bool, str]:
+    """
+    Micro-confirm mode 2 (continuation):
+      Pullback into directional zone -> then break internal structure (15m).
+
+    LONG:
+      1) Price trades into zone (touch) without deep fill.
+      2) After touch, close breaks above most recent swing high (internal).
+    SHORT: symmetric.
+
+    Notes:
+      - This does NOT require sweep.
+      - Uses fractal swings as internal proxy (v0).
+    """
+    if not candles_15m or len(candles_15m) < 120:
+        return False, "insufficient_15m_candles"
+
+    # Reject zones already too filled (continuation prefers cleaner zones)
+    if float(getattr(zone, "fill_pct", 1.0)) > max_zone_fill_pct:
+        return False, "zone_too_filled_for_continuation"
+
+    c = candles_15m[-lookback:] if len(candles_15m) > lookback else candles_15m
+    atr15 = _atr(c, 14)
+    buf = (atr15 * min_break_atr_mult) if (atr15 is not None and atr15 > 0) else 0.0
+
+    top = float(zone.top)
+    bot = float(zone.bottom)
+    if top < bot:
+        top, bot = bot, top
+
+    # Detect first touch into zone (mitigation)
+    touch_idx = None
+    if intent == "LONG":
+        # touch if low enters the zone area
+        for i in range(0, len(c)):
+            if float(c[i].l) <= top and float(c[i].l) >= bot:
+                touch_idx = i
+                break
+    else:
+        for i in range(0, len(c)):
+            if float(c[i].h) >= bot and float(c[i].h) <= top:
+                touch_idx = i
+                break
+
+    if touch_idx is None:
+        return False, "no_pullback_into_zone"
+
+    # Internal break after touch: use latest swing levels before touch as reference
+    swings = _fractal_swings_generic(c, left=2, right=2)
+    highs = [(i, p) for (i, k, p) in swings if k == "H"]
+    lows = [(i, p) for (i, k, p) in swings if k == "L"]
+    if len(highs) < 2 or len(lows) < 2:
+        return False, "insufficient_15m_swings"
+
+    prev_highs = [(i, p) for (i, p) in highs if i < touch_idx]
+    prev_lows = [(i, p) for (i, p) in lows if i < touch_idx]
+    if not prev_highs or not prev_lows:
+        return False, "no_reference_swings"
+
+    ref_high = prev_highs[-1][1]
+    ref_low = prev_lows[-1][1]
+
+    if intent == "LONG":
+        # break internal high after touch
+        for j in range(touch_idx + 1, len(c)):
+            if float(c[j].c) > (ref_high + buf):
+                return True, "micro_pullback_break_up"
+        return False, "no_internal_break_up"
+    else:
+        # break internal low after touch
+        for j in range(touch_idx + 1, len(c)):
+            if float(c[j].c) < (ref_low - buf):
+                return True, "micro_pullback_break_down"
+        return False, "no_internal_break_down"
+
+
+def _pick_micro_mode(g2: Gate2Result) -> str:
+    """
+    Decide micro-confirm mode based on derivatives directional hint.
+    Expecting g2.directional_bias_hint like:
+      - "...continuation..." or "...reversal..." or "no_trade"
+    """
+    hint = str(getattr(g2, "directional_bias_hint", "") or "").lower()
+    if "continu" in hint:
+        return "mode2"
+    if "revers" in hint:
+        return "mode1"
+    return "mode1"
+
 def _pick_intent(g1: Gate1Result) -> Optional[str]:
     """
     Practical directional intent:
@@ -307,8 +403,23 @@ def gate3_structure_confirmation_v0(
             intent=intent,
         )
 
-    # Micro-confirm (15m): sweep -> internal CHoCH
-    micro_ok, micro_reason = _micro_confirm_15m(snapshot.candles_15m, intent=intent, lookback=48, min_break_atr_mult=0.10)
+    # Micro-confirm (15m): choose mode based on derivatives directional hint
+    micro_mode = _pick_micro_mode(g2)
+    if micro_mode == "mode2":
+        micro_ok, micro_reason = _micro_confirm_pullback_break_15m(
+            snapshot.candles_15m,
+            intent=intent,
+            zone=zone,
+            lookback=64,
+            min_break_atr_mult=0.10,
+        )
+    else:
+        micro_ok, micro_reason = _micro_confirm_15m(
+            snapshot.candles_15m,
+            intent=intent,
+            lookback=48,
+            min_break_atr_mult=0.10,
+        )
     if not micro_ok:
         return Gate3Result(
             passed=False,
@@ -319,7 +430,7 @@ def gate3_structure_confirmation_v0(
             entry=None,
             sl=None,
             tp2=None,
-            notes={"micro_reason": micro_reason, "intent": intent},
+            notes={"micro_reason": micro_reason, "micro_mode": micro_mode, "intent": intent},
             intent=intent,
         )
 
@@ -402,6 +513,7 @@ def gate3_structure_confirmation_v0(
             "zone_fill": f"{zone.fill_pct:.2f}",
             "intent": intent,
             "micro": micro_reason,
+            "micro_mode": micro_mode,
         },
         intent=intent,
     )
