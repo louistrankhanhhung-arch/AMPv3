@@ -272,12 +272,9 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         confidence = "MED"
         if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
             confidence = "HIGH"
-        # In healthy_trend, "funding_extreme" and "oi_spike" should not inherit prior crowded vars
-        healthy_funding_extreme = not bool(funding_ok)
-        healthy_oi_spike = not bool(oi_ok)
-        # In healthy_trend, these should reflect "not overheated" by definition
-        healthy_funding_extreme = not bool(funding_ok)
-        healthy_oi_spike = not bool(oi_ok)
+        # In healthy_trend, by definition we are NOT in an overheated/overcrowded state.
+        healthy_funding_extreme = False
+        healthy_oi_spike = False
         return Gate2Result(
             passed=True,
             reason="pass",
@@ -298,6 +295,9 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
+    # Neutral flags: keep them explicit for logging/monitoring
+    neutral_funding_extreme = bool(extreme_funding)
+    neutral_oi_spike = bool(oi_spike)
     return Gate2Result(
         passed=False,
         reason="neutral",
@@ -308,8 +308,8 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         confirm4h=confirm4h,
         confirm4h_reason=confirm4h_reason,
         ratio_skew=ratio_skew,
-        funding_extreme=bool(extreme_funding),
-        oi_spike=bool(oi_spike),
+        funding_extreme=neutral_funding_extreme,
+        oi_spike=neutral_oi_spike,
         ratio_long_pct=rlp,
         funding=funding,
         funding_z=funding_z,
