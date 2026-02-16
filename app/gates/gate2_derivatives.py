@@ -14,6 +14,7 @@ class Gate2Result:
     regime: str  # "healthy_trend" | "crowded_squeeze" | "neutral"
     directional_bias_hint: str  # continuation/reversal preference hint (v1)
     confidence: str             # "HIGH"|"MED"|"LOW"
+    alert_only: bool            # True when signal is "risk warning" not "trade gate pass"
     confirm4h: bool
     confirm4h_reason: str
     ratio_skew: Optional[str]   # "LONG"|"SHORT"|None
@@ -58,7 +59,6 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
     funding = ctx.last.funding_rate
     # --- Funding z-score (Option 2 fix) ---
     # Prefer recomputing from rolling mean/std on ctx; fallback to ctx.funding_z.
-    funding_z = getattr(ctx, "funding_z", None)
     _mu = getattr(ctx, "funding_mean", None)
     _sd = getattr(ctx, "funding_std", None)
     if isinstance(funding, (int, float)) and isinstance(_mu, (int, float)) and isinstance(_sd, (int, float)):
@@ -124,12 +124,35 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             reason = "ratio_crowded_hard"
         else:
             reason = "funding_extreme_hard"
+        # IMPORTANT: If ctx is not ready, treat this as ALERT-ONLY (risk warning),
+        # not as a trade-eligible Gate2 pass. This prevents reversal trades based on 1-2 samples.
+        if not ctx.ready:
+            return Gate2Result(
+                passed=False,
+                reason=f"alert_only_{reason}",
+                regime="crowded_squeeze",
+                directional_bias_hint="no_trade",
+                confidence="LOW",
+                alert_only=True,
+                confirm4h=confirm4h,
+                confirm4h_reason=confirm4h_reason,
+                ratio_skew=ratio_skew,
+                funding_extreme=funding_extreme,
+                oi_spike=oi_spike,
+                ratio_long_pct=rlp,
+                funding=funding,
+                funding_z=funding_z,
+                oi_delta_pct=oi_delta_pct,
+                oi_spike_z=oi_spike_z,
+                oi_slope_4h_pct=oi_slope_4h_pct,
+            )
         return Gate2Result(
             passed=True,
             reason=reason,
             regime="crowded_squeeze",
             directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
             confidence=confidence,
+            alert_only=False,
             confirm4h=confirm4h,
             confirm4h_reason=confirm4h_reason,
             ratio_skew=ratio_skew,
@@ -150,6 +173,7 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             regime="neutral",
             directional_bias_hint=_directional_hint("neutral", ratio_skew),
             confidence="LOW",
+            alert_only=False,
             confirm4h=confirm4h,
             confirm4h_reason=confirm4h_reason,
             ratio_skew=ratio_skew,
@@ -210,6 +234,7 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             regime="crowded_squeeze",
             directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
             confidence=confidence,
+            alert_only=False,
             confirm4h=confirm4h,
             confirm4h_reason=confirm4h_reason,
             ratio_skew=ratio_skew,
@@ -244,6 +269,9 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         confidence = "MED"
         if isinstance(rlp, (int, float)) and isinstance(funding_z, (int, float)) and isinstance(oi_spike_z, (int, float)):
             confidence = "HIGH"
+        # In healthy_trend, "funding_extreme" and "oi_spike" should not inherit prior crowded vars
+        healthy_funding_extreme = not bool(funding_ok)
+        healthy_oi_spike = not bool(oi_ok)
         # In healthy_trend, these should reflect "not overheated" by definition
         healthy_funding_extreme = not bool(funding_ok)
         healthy_oi_spike = not bool(oi_ok)
@@ -253,6 +281,7 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             regime="healthy_trend",
             directional_bias_hint=_directional_hint("healthy_trend", ratio_skew),
             confidence=confidence,
+            alert_only=False,
             confirm4h=confirm4h,
             confirm4h_reason=confirm4h_reason,
             ratio_skew=ratio_skew,
@@ -272,6 +301,7 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         regime="neutral",
         directional_bias_hint=_directional_hint("neutral", ratio_skew),
         confidence="MED" if ctx.ready else "LOW",
+        alert_only=False,
         confirm4h=confirm4h,
         confirm4h_reason=confirm4h_reason,
         ratio_skew=ratio_skew,
