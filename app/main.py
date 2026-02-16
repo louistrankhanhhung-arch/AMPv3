@@ -71,6 +71,11 @@ def main() -> None:
             for sym in cfg.symbols:
                 snap = build_snapshot(sym, market, deriv, client)
 
+                # --- IMPORTANT: Always update/persist derivatives rolling series ---
+                # Do this BEFORE Gate 1 so history accumulates even when Gate 1 fails.
+                # This fixes "restart -> hist=1" syndrome and makes Gate 2 ready faster.
+                ctx2 = deriv.get_gate2_ctx(sym, ttl_sec=30)
+
                 # Tầng 1: chỉ log để kiểm tra pipeline.
                 # Tầng 2 trở đi sẽ gọi gates/smc và notify.
                 log.info(
@@ -106,7 +111,6 @@ def main() -> None:
 
                 # Tầng 3 - Gate 2: Derivatives Regime (ONLY if Gate 1 passed - A-mode strict)
                 if g1.passed:
-                    ctx2 = deriv.get_gate2_ctx(sym, ttl_sec=30)
                     g2 = gate2_derivatives_regime(snap, ctx2)
                     log.info(
                         "G2 %s %s | reason=%s regime=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | hist=%s",
