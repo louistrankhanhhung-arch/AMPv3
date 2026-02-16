@@ -67,8 +67,11 @@ class DerivativesFetcher:
         if self._db_ready:
             return
         try:
-            con = sqlite3.connect(self._db_path)
+            con = sqlite3.connect(self._db_path, timeout=10)
             try:
+                # Better concurrent write behavior (safe even single-process)
+                con.execute("PRAGMA journal_mode=WAL;")
+                con.execute("PRAGMA synchronous=NORMAL;")
                 con.execute(
                     """
                     CREATE TABLE IF NOT EXISTS deriv_series_1h (
@@ -96,7 +99,7 @@ class DerivativesFetcher:
         if not self._db_ready:
             return []
         try:
-            con = sqlite3.connect(self._db_path)
+            con = sqlite3.connect(self._db_path, timeout=10)
             try:
                 cur = con.execute(
                     """
@@ -134,7 +137,7 @@ class DerivativesFetcher:
         if not self._db_ready:
             return
         try:
-            con = sqlite3.connect(self._db_path)
+            con = sqlite3.connect(self._db_path, timeout=10)
             try:
                 con.execute(
                     """
