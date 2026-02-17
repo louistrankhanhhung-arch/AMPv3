@@ -332,8 +332,9 @@ def _tp2_from_gate1(g1: Gate1Result, intent: str) -> Optional[float]:
     if liq is None:
         return None
     if intent == "LONG":
-        return getattr(liq, "liq_above", None)
-    return getattr(liq, "liq_below", None)
+        # LiquidityTargets uses `above/below`. Keep backward-compat if old field names exist.
+        return getattr(liq, "above", None) or getattr(liq, "liq_above", None)
+    return getattr(liq, "below", None) or getattr(liq, "liq_below", None)
 
 
 def gate3_structure_confirmation_v0(
