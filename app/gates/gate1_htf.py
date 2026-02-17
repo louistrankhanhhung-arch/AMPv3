@@ -12,6 +12,21 @@ class Gate1Result:
     htf: Optional[HTFBias]
     liq: Optional[LiquidityTargets]
 
+    # --- Compatibility shims for downstream gates (Gate3 v0.x) ---
+    # Gate3 currently expects g1.bias / g1.loc / g1.pos_pct.
+    # Keep these as read-only properties to avoid changing all call-sites.
+    @property
+    def bias(self) -> Optional[str]:
+        return getattr(self.htf, "bias", None) if self.htf is not None else None
+
+    @property
+    def loc(self) -> Optional[str]:
+        return getattr(self.htf, "location", None) if self.htf is not None else None
+
+    @property
+    def pos_pct(self) -> Optional[float]:
+        return getattr(self.htf, "pos_pct", None) if self.htf is not None else None
+
 def gate1_htf_clarity(snapshot: MarketSnapshot) -> Gate1Result:
     htf = compute_htf_bias(snapshot.candles_4h, window=60)
     if htf is None:
