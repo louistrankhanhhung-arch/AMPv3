@@ -16,10 +16,7 @@ class Gate3Result:
     reason: str
     structure: Structure1HResult
     zone: Optional[Zone]
-    rr_tp2: Optional[float]
-    entry: Optional[float]
-    sl: Optional[float]
-    tp2: Optional[float]
+    tp2_candidate: Optional[float]
     notes: Dict[str, str]
     intent: Optional[str] = None  # "LONG" | "SHORT" | None
 
@@ -344,14 +341,14 @@ def gate3_structure_confirmation_v0(
     min_rr_tp2: float = 2.5,
 ) -> Gate3Result:
     """
-    Gate3 v0: SMC structure + zone + RR sanity.
+    Gate3 v0: SMC structure + zone selection + candidates (no planning).
 
     Fail-closed rules:
     - Gate1 must pass
     - Gate2 must pass AND not alert_only
     - 1H structure must show BOS or CHoCH (close-confirm)
     - Must have a usable 15m FVG zone
-    - RR to TP2 >= min_rr_tp2 (TP2 approximated via last swing in 1H)
+    - (RR filter is moved to signals/planner.py; Gate3 only returns candidates)
     """
     structure = analyze_structure_1h(snapshot.candles_1h, close_confirm=True)
 
@@ -362,10 +359,7 @@ def gate3_structure_confirmation_v0(
             reason="gate1_fail",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"hint": "shadow_mode_ok"},
             intent=None,
         )
@@ -377,10 +371,7 @@ def gate3_structure_confirmation_v0(
             reason="gate2_not_trade_eligible",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"g2_regime": str(getattr(g2, "regime", None)), "g2_reason": str(getattr(g2, "reason", None))},
             intent=None,
         )
@@ -392,10 +383,7 @@ def gate3_structure_confirmation_v0(
             reason=f"struct_no_break_{structure.reason}",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"trend": structure.trend},
             intent=None,
         )
@@ -408,10 +396,7 @@ def gate3_structure_confirmation_v0(
             reason="no_clear_intent_htf",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"bias": str(getattr(g1, "bias", None)), "loc": str(getattr(g1, "loc", None))},
             intent=None,
         )
@@ -423,10 +408,7 @@ def gate3_structure_confirmation_v0(
             reason="no_displacement_1h",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"struct": structure.reason},
             intent=intent,
         )
@@ -443,10 +425,7 @@ def gate3_structure_confirmation_v0(
             reason="no_valid_zone_15m_directional",
             structure=structure,
             zone=None,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"zone_count": str(len(zones)), "intent": intent},
             intent=intent,
         )
@@ -475,75 +454,26 @@ def gate3_structure_confirmation_v0(
             reason="micro_confirm_fail",
             structure=structure,
             zone=zone,
-            rr_tp2=None,
-            entry=None,
-            sl=None,
-            tp2=None,
+            tp2_candidate=None,
             notes={"micro_reason": micro_reason, "micro_mode": micro_mode, "intent": intent, "strong_disp": str(strong_disp)},
             intent=intent,
         )
 
-    # Entry: use zone edge closer to current price (more realistic than pure mid)
+    # Candidate context only (planner will compute entry/SL/TP ladder/RR)
     mark = float(getattr(snapshot, "mark", getattr(snapshot, "mark_price", 0.0)) or 0.0)
     top = float(zone.top)
     bot = float(zone.bottom)
     if top < bot:
         top, bot = bot, top
-    # For LONG: prefer entry near top of bullish FVG (mitigation), for SHORT: near bottom
-    entry = top if intent == "LONG" else bot
-
-    # SL buffer using ATR (more practical than zone height)
-    a15 = _atr(snapshot.candles_15m, 14) or 0.0
-    a1h = _atr(snapshot.candles_1h, 14) or 0.0
-    a = max(a15, 0.5 * a1h)  # blended volatility proxy
-    buf = max(1e-12, 0.35 * a)  # tune later
-
-    # TP2 v0 approximation:
-    # - If structure is up/bos: TP2 = last swing high
-    # - If structure is down/bos: TP2 = last swing low
-    # - If CHoCH: still target opposite swing as TP2 placeholder (you can refine)
-    tp2: Optional[float] = None
-    sl: Optional[float] = None
-
+    tp2_candidate: Optional[float] = None
     if intent == "LONG":
-        sl = bot - buf
-        tp2 = _tp2_from_gate1(g1, intent="LONG")
-        if tp2 is None:
-            tp2 = structure.last_swing_high.price if structure.last_swing_high else None
+        tp2_candidate = _tp2_from_gate1(g1, intent="LONG")
+        if tp2_candidate is None:
+            tp2_candidate = structure.last_swing_high.price if structure.last_swing_high else None
     else:
-        sl = top + buf
-        tp2 = _tp2_from_gate1(g1, intent="SHORT")
-        if tp2 is None:
-            tp2 = structure.last_swing_low.price if structure.last_swing_low else None
-
-    if tp2 is None or sl is None:
-        return Gate3Result(
-            passed=False,
-            reason="tp2_or_sl_missing",
-            structure=structure,
-            zone=zone,
-            rr_tp2=None,
-            entry=entry,
-            sl=sl,
-            tp2=tp2,
-            notes={},
-            intent=intent,
-        )
-
-    rr_tp2 = _rr(entry, sl, tp2)
-    if rr_tp2 is None or rr_tp2 < min_rr_tp2:
-        return Gate3Result(
-            passed=False,
-            reason="rr_too_low",
-            structure=structure,
-            zone=zone,
-            rr_tp2=rr_tp2,
-            entry=entry,
-            sl=sl,
-            tp2=tp2,
-            notes={"min_rr_tp2": str(min_rr_tp2), "intent": intent},
-            intent=intent,
-        )
+        tp2_candidate = _tp2_from_gate1(g1, intent="SHORT")
+        if tp2_candidate is None:
+            tp2_candidate = structure.last_swing_low.price if structure.last_swing_low else None
 
     # PASS
     return Gate3Result(
@@ -551,10 +481,7 @@ def gate3_structure_confirmation_v0(
         reason="pass",
         structure=structure,
         zone=zone,
-        rr_tp2=rr_tp2,
-        entry=entry,
-        sl=sl,
-        tp2=tp2,
+        tp2_candidate=tp2_candidate,
         notes={
             "trend": structure.trend,
             "break_level": str(structure.break_level),
@@ -564,6 +491,10 @@ def gate3_structure_confirmation_v0(
             "micro": micro_reason,
             "micro_mode": micro_mode,
             "strong_disp": str(strong_disp),
+            "mark": str(mark),
+            "zone_top": str(top),
+            "zone_bot": str(bot),
+            "min_rr_tp2_moved_to_planner": str(min_rr_tp2),
         },
         intent=intent,
     )
