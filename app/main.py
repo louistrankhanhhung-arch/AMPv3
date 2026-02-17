@@ -140,11 +140,11 @@ def main() -> None:
                     # NOTE: Gate3 is fail-closed; it will refuse trade if Gate2 not trade-eligible.
                     g3 = gate3_structure_confirmation_v0(snap, g1, g2)
                     log.info(
-                        "G3 %s %s | reason=%s | rr_tp2=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                        "G3 %s %s | reason=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
                         snap.symbol,
                         "PASS" if g3.passed else "FAIL",
                         getattr(g3, "reason", None),
-                        getattr(g3, "rr_tp2", None),
+                        getattr(g3, "tp2_candidate", None),
                         (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
                         (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
                         (getattr(g3.structure, "trend", None) if getattr(g3, "structure", None) else None),
