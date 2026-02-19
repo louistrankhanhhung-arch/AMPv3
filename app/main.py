@@ -120,38 +120,157 @@ def main() -> None:
                     getattr(snap.deriv_1h, "ratio_long_pct", None),
                 )
 
-                # Tầng 3 - Gate 2: Derivatives Regime (ONLY if Gate 1 passed - A-mode strict)
-                if g1.passed:
-                    g2 = gate2_derivatives_regime(snap, ctx2)
+                # --- One-line journal (fail-closed, correct reason semantics) ---
+                # Gate fail -> gate reason
+                # Planner fail -> planner reason
+                # Score skip -> score reasons
+
+                if not g1.passed:
                     log.info(
-                        "G2 %s %s | reason=%s regime=%s | alert_only=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | hist=%s",
+                        "JOURNAL %s | ex=%s | stage=G1_FAIL | reason=%s | g1=%s/%s pos=%.2f | spread_pct=%s | ratio_long_pct=%s",
                         snap.symbol,
-                        "PASS" if g2.passed else "FAIL",
+                        client.name,
+                        getattr(g1, "reason", None),
+                        (g1.htf.bias if g1.htf else None),
+                        (g1.htf.location if g1.htf else None),
+                        (g1.htf.pos_pct if g1.htf else -1),
+                        snap.spread_pct,
+                        getattr(snap.deriv_1h, "ratio_long_pct", None),
+                    )
+                    continue
+
+                # Tầng 3 - Gate 2: Derivatives Regime (A-mode strict)
+                g2 = gate2_derivatives_regime(snap, ctx2)
+                log.info(
+                    "G2 %s %s | reason=%s regime=%s | alert_only=%s | ratio_long_pct=%s | funding=%s fz=%s | oi_d_pct=%s oi_spike_z=%s | oi_slope_4h_pct=%s | hist=%s",
+                    snap.symbol,
+                    "PASS" if g2.passed else "FAIL",
+                    getattr(g2, "reason", None),
+                    getattr(g2, "regime", None),
+                    getattr(g2, "alert_only", False),
+                    getattr(g2, "ratio_long_pct", None),
+                    getattr(g2, "funding", None),
+                    getattr(g2, "funding_z", None),
+                    getattr(g2, "oi_delta_pct", None),
+                    getattr(g2, "oi_spike_z", None),
+                    getattr(g2, "oi_slope_4h_pct", None),
+                    getattr(ctx2, "history_len", None),
+                )
+
+                if (not g2.passed) or bool(getattr(g2, "alert_only", False)):
+                    log.info(
+                        "JOURNAL %s | ex=%s | stage=G2_FAIL | reason=%s | g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s alert=%s | ratio_long_pct=%s | funding_z=%s | oi_slope_4h_pct=%s",
+                        snap.symbol,
+                        client.name,
                         getattr(g2, "reason", None),
+                        (g1.htf.bias if g1.htf else None),
+                        (g1.htf.location if g1.htf else None),
+                        (g1.htf.pos_pct if g1.htf else -1),
                         getattr(g2, "regime", None),
+                        getattr(g2, "confidence", None),
+                        getattr(g2, "directional_bias_hint", None),
                         getattr(g2, "alert_only", False),
                         getattr(g2, "ratio_long_pct", None),
-                        getattr(g2, "funding", None),
                         getattr(g2, "funding_z", None),
-                        getattr(g2, "oi_delta_pct", None),
-                        getattr(g2, "oi_spike_z", None),
-                        getattr(ctx2, "history_len", None),
+                        getattr(g2, "oi_slope_4h_pct", None),
                     )
+                    continue
 
-                    # Tầng 4 - Gate 3 (v0): Structure Confirmation (SMC)
-                    # NOTE: Gate3 is fail-closed; it will refuse trade if Gate2 not trade-eligible.
-                    g3 = gate3_structure_confirmation_v0(snap, g1, g2)
+                # Tầng 4 - Gate 3: Structure Confirmation (SMC)
+                g3 = gate3_structure_confirmation_v0(snap, g1, g2)
+                log.info(
+                    "G3 %s %s | reason=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                    snap.symbol,
+                    "PASS" if g3.passed else "FAIL",
+                    getattr(g3, "reason", None),
+                    getattr(g3, "tp2_candidate", None),
+                    (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
+                    (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
+                    (getattr(g3.structure, "trend", None) if getattr(g3, "structure", None) else None),
+                    (getattr(g3.structure, "break_level", None) if getattr(g3, "structure", None) else None),
+                )
+
+                if not g3.passed:
                     log.info(
-                        "G3 %s %s | reason=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                        "JOURNAL %s | ex=%s | stage=G3_FAIL | reason=%s | g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s | struct=%s",
                         snap.symbol,
-                        "PASS" if g3.passed else "FAIL",
+                        client.name,
                         getattr(g3, "reason", None),
+                        (g1.htf.bias if g1.htf else None),
+                        (g1.htf.location if g1.htf else None),
+                        (g1.htf.pos_pct if g1.htf else -1),
+                        getattr(g2, "regime", None),
+                        getattr(g2, "confidence", None),
+                        getattr(g2, "directional_bias_hint", None),
+                        (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
+                    )
+                    continue
+
+                # Planner (REAL RR)
+                plan = build_plan_v0(snap, g1, g2, g3, min_rr_tp2=2.5)
+                if plan is None:
+                    # best-effort planner reason (since planner currently returns None only)
+                    log.info(
+                        "JOURNAL %s | ex=%s | stage=PLANNER_FAIL | reason=%s | intent=%s | tp2_candidate=%s | zone=%s",
+                        snap.symbol,
+                        client.name,
+                        "planner_guard_fail",
+                        getattr(g3, "intent", None),
                         getattr(g3, "tp2_candidate", None),
                         (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
-                        (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
-                        (getattr(g3.structure, "trend", None) if getattr(g3, "structure", None) else None),
-                        (getattr(g3.structure, "break_level", None) if getattr(g3, "structure", None) else None),
                     )
+                    continue
+
+                # Score (strict, requires plan)
+                s = score_signal_v1(snap, g1, g2, g3, plan=plan, only_trade_tiers=("A", "B"))
+                if not s.passed:
+                    log.info(
+                        "JOURNAL %s | ex=%s | stage=SCORE_SKIP | reason=%s | tier=%s score=%s rr2=%.2f | intent=%s | E1=%.4f SL=%.4f",
+                        plan.symbol,
+                        client.name,
+                        ",".join(s.reasons[:6]),
+                        s.tier,
+                        s.score_0_100,
+                        s.rr_tp2,
+                        plan.intent,
+                        plan.entry1,
+                        plan.sl,
+                    )
+                    continue
+
+                # Final journal (PLAN + SCORE in one line, stable keys)
+                tp_map = {tp.name: tp.price for tp in plan.tps}
+                log.info(
+                    "JOURNAL %s | ex=%s | stage=OK | tier=%s score=%s rr2=%.2f rmult=%.2f | intent=%s | "
+                    "E1=%.4f E2=%s SL=%.4f | TP1=%.4f TP2=%.4f TP3=%.4f TP4=%.4f TP5=%.4f | "
+                    "g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s | g3=%s | zone=%s fill=%s | leeway=%.4f(%s)",
+                    plan.symbol,
+                    client.name,
+                    s.tier,
+                    s.score_0_100,
+                    s.rr_tp2,
+                    s.risk_mult,
+                    plan.intent,
+                    plan.entry1,
+                    (f"{plan.entry2:.4f}" if plan.entry2 is not None else "NA"),
+                    plan.sl,
+                    float(tp_map.get("TP1", 0.0)),
+                    float(tp_map.get("TP2", 0.0)),
+                    float(tp_map.get("TP3", 0.0)),
+                    float(tp_map.get("TP4", 0.0)),
+                    float(tp_map.get("TP5", 0.0)),
+                    (g1.htf.bias if g1.htf else None),
+                    (g1.htf.location if g1.htf else None),
+                    (g1.htf.pos_pct if g1.htf else -1),
+                    getattr(g2, "regime", None),
+                    getattr(g2, "confidence", None),
+                    getattr(g2, "directional_bias_hint", None),
+                    getattr(g3, "reason", None),
+                    (getattr(getattr(g3, "zone", None), "kind", None)),
+                    (getattr(getattr(g3, "zone", None), "fill_pct", None)),
+                    plan.leeway_price,
+                    plan.leeway_reason,
+                )
 
                     # --- Build plan (REAL RR) then score (strict: requires plan) ---
                     plan = build_plan_v0(snap, g1, g2, g3, min_rr_tp2=2.5)
