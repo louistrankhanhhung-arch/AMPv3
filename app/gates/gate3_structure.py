@@ -360,6 +360,20 @@ def _strong_displacement_1h(candles_1h, strong_mult: float = 1.2) -> bool:
     body = abs(float(last.c) - float(last.o))
     return body >= strong_mult * a
 
+def _disp_score_1h(candles_1h) -> Optional[float]:
+    """
+    Debug-only: displacement strength score = body / ATR(14) on last 1H candle.
+    Returns None if insufficient candles or ATR invalid.
+    """
+    a = _atr(candles_1h, 14)
+    if a is None or a <= 0:
+        return None
+    if not candles_1h:
+        return None
+    last = candles_1h[-1]
+    body = abs(float(last.c) - float(last.o))
+    return float(body) / float(a)
+
 def _pick_zone(zones: List[Zone], intent: str) -> Optional[Zone]:
     """
     Prefer directional FVG + not deeply filled.
@@ -480,6 +494,8 @@ def gate3_structure_confirmation_v0(
 
     # --- Mode-specific confirmation (Gate3 = confirmation gate) ---
     trigger = "n/a"
+    # Debug: displacement strength score (does not affect logic)
+    disp_score = _disp_score_1h(snapshot.candles_1h)
     if mode == "trend":
         # Structure must show BOS/CHoCH (close-confirm)
         if not (structure.bos or structure.choch):
@@ -500,7 +516,7 @@ def gate3_structure_confirmation_v0(
                 structure=structure,
                 zone=None,
                 tp2_candidate=None,
-                notes={"struct": structure.reason, "mode": mode},
+                notes={"struct": structure.reason, "mode": mode, "disp_score": str(disp_score)},
                 intent=intent,
             )
         trigger = "bos_or_choch+disp"
@@ -538,6 +554,7 @@ def gate3_structure_confirmation_v0(
                     "sweep_ok": str(bool(sweep_ok)),
                     "disp_against": str(bool(disp_against)),
                     "struct": str(structure.reason),
+                    "disp_score": str(disp_score),
                 },
                 intent=intent,
             )
@@ -555,7 +572,7 @@ def gate3_structure_confirmation_v0(
             structure=structure,
             zone=None,
             tp2_candidate=None,
-            notes={"zone_count": str(len(zones)), "intent": intent, "mode": mode, "trigger": trigger},
+            notes={"zone_count": str(len(zones)), "intent": intent, "mode": mode, "trigger": trigger, "disp_score": str(disp_score)},
             intent=intent,
         )
 
@@ -593,6 +610,7 @@ def gate3_structure_confirmation_v0(
                 "strong_disp": str(strong_disp),
                 "mode": mode,
                 "trigger": trigger,
+                "disp_score": str(disp_score),
             },
             intent=intent,
         )
@@ -629,6 +647,7 @@ def gate3_structure_confirmation_v0(
             "micro": micro_reason,
             "micro_mode": micro_mode,
             "strong_disp": str(strong_disp),
+            "disp_score": str(disp_score),
             "mark": str(mark),
             "zone_top": str(top),
             "zone_bot": str(bot),
