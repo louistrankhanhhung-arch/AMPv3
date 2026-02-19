@@ -180,5 +180,3 @@ def score_signal_v1(
 
     checks["final_tier"] = tier
     return ScoreResult(passed, tier, risk_mult, score_i, rr_tp2, reasons, checks)
-
-*** End Patch
