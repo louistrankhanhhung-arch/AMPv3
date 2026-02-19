@@ -14,6 +14,8 @@ from app.data.models import MarketSnapshot, Derivatives1H
 from app.gates.gate1_htf import gate1_htf_clarity
 from app.gates.gate2_derivatives import gate2_derivatives_regime
 from app.gates.gate3_structure import gate3_structure_confirmation_v0
+from app.signals.planner import build_plan_v0
+from app.gates.scoring import score_signal_v1
 
 
 def build_snapshot(
@@ -150,6 +152,65 @@ def main() -> None:
                         (getattr(g3.structure, "trend", None) if getattr(g3, "structure", None) else None),
                         (getattr(g3.structure, "break_level", None) if getattr(g3, "structure", None) else None),
                     )
+
+                    # --- Build plan (REAL RR) then score (strict: requires plan) ---
+                    plan = build_plan_v0(snap, g1, g2, g3, min_rr_tp2=2.5)
+                    if plan is None:
+                        # One-line journal even on skip (plan guard fail)
+                        log.info(
+                            "JOURNAL %s | ex=%s | intent=%s | g1=%s/%s | g2=%s/%s/%s | g3=%s | PLAN=SKIP | SCORE=SKIP | reason=plan_guard_fail",
+                            snap.symbol,
+                            client.name,
+                            getattr(g3, "intent", None),
+                            (g1.htf.bias if g1.htf else None),
+                            (g1.htf.location if g1.htf else None),
+                            getattr(g2, "regime", None),
+                            getattr(g2, "confidence", None),
+                            getattr(g2, "directional_bias_hint", None),
+                            getattr(g3, "reason", None),
+                        )
+                    else:
+                        s = score_signal_v1(snap, g1, g2, g3, plan=plan, only_trade_tiers=("A", "B"))
+
+                        # Extract TP ladder
+                        tp_map = {tp.name: tp.price for tp in plan.tps}
+                        # One-line journal: PLAN + SCORE together (stable keys, easy grep)
+                        log.info(
+                            "JOURNAL %s | ex=%s | intent=%s | tier=%s score=%s rr2=%.2f rmult=%.2f | "
+                            "E1=%.4f E2=%s SL=%.4f | TP1=%.4f TP2=%.4f TP3=%.4f TP4=%.4f TP5=%.4f | "
+                            "g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s alert=%s | "
+                            "g3=%s bos=%s choch=%s | zone=%s fill=%s | leeway=%.4f(%s) | reasons=%s",
+                            plan.symbol,
+                            client.name,
+                            plan.intent,
+                            s.tier,
+                            s.score_0_100,
+                            s.rr_tp2,
+                            s.risk_mult,
+                            plan.entry1,
+                            (f"{plan.entry2:.4f}" if plan.entry2 is not None else "NA"),
+                            plan.sl,
+                            float(tp_map.get("TP1", 0.0)),
+                            float(tp_map.get("TP2", 0.0)),
+                            float(tp_map.get("TP3", 0.0)),
+                            float(tp_map.get("TP4", 0.0)),
+                            float(tp_map.get("TP5", 0.0)),
+                            (g1.htf.bias if g1.htf else None),
+                            (g1.htf.location if g1.htf else None),
+                            (g1.htf.pos_pct if g1.htf else -1),
+                            getattr(g2, "regime", None),
+                            getattr(g2, "confidence", None),
+                            getattr(g2, "directional_bias_hint", None),
+                            getattr(g2, "alert_only", False),
+                            getattr(g3, "reason", None),
+                            bool(getattr(getattr(g3, "structure", None), "bos", False)),
+                            bool(getattr(getattr(g3, "structure", None), "choch", False)),
+                            (getattr(getattr(g3, "zone", None), "kind", None)),
+                            (getattr(getattr(g3, "zone", None), "fill_pct", None)),
+                            plan.leeway_price,
+                            plan.leeway_reason,
+                            ",".join(s.reasons[:6]),
+                        )
 
             time.sleep(cfg.scan_interval_sec)
 
