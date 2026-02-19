@@ -50,6 +50,45 @@ def _directional_hint(regime: str, skew: Optional[str]) -> str:
         return "squeeze_risk"
     return "no_trade"
 
+def _atr(candles, n: int = 14) -> Optional[float]:
+    if candles is None or len(candles) < n + 2:
+        return None
+    trs = []
+    for i in range(-n, 0):
+        c = candles[i]
+        p = candles[i - 1]
+        tr = max(c.h - c.l, abs(c.h - p.c), abs(c.l - p.c))
+        trs.append(float(tr))
+    if not trs:
+        return None
+    return sum(trs) / len(trs)
+
+
+def _displacement_1h_against_crowd(snapshot: MarketSnapshot, skew: Optional[str], *, body_atr_mult: float = 0.60) -> bool:
+    """
+    Displacement 1H (simple, fast):
+      - crowded LONG -> look for strong bearish 1H candle (body >= 0.60*ATR1H)
+      - crowded SHORT -> look for strong bullish 1H candle (body >= 0.60*ATR1H)
+    This confirms liquidation impulse / squeeze start, reducing chop noise.
+    """
+    if skew not in ("LONG", "SHORT"):
+        return False
+    c = getattr(snapshot, "candles_1h", None)
+    if not c or len(c) < 40:
+        return False
+    last = c[-1]
+    atr1h = _atr(c, 14)
+    if atr1h is None or atr1h <= 0:
+        return False
+    body = abs(float(last.c) - float(last.o))
+    strong = body >= float(body_atr_mult) * float(atr1h)
+    if not strong:
+        return False
+    # Against crowd direction
+    if skew == "LONG":
+        return float(last.c) < float(last.o)
+    return float(last.c) > float(last.o)
+
 def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx) -> Gate2Result:
     """
     Gate 2 - Derivatives Regime (A-mode: strict, quality > quantity)
@@ -317,3 +356,67 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         oi_spike_z=oi_spike_z,
         oi_slope_4h_pct=oi_slope_4h_pct,
     )
+
+    # --- NEW: Ratio-skew relaxation (anti-chop) ---
+    # Ratio skew is only trade-eligible when:
+    #   - OI trend confirms crowding (rolling slope up), OR
+    #   - There is 1H displacement AGAINST the crowd (liquidation impulse).
+    oi_slope_ok = False
+    if isinstance(oi_slope_4h_pct, (int, float)):
+        oi_slope_ok = float(oi_slope_4h_pct) >= 0.10  # +0.10% per 4H bucket (tunable)
+    disp_ok = _displacement_1h_against_crowd(snapshot, ratio_skew, body_atr_mult=0.60)
+
+    if crowded_ratio and (oi_slope_ok or disp_ok):
+        # trade-eligible crowded squeeze even if funding/oi_spike are not extreme yet
+        why = "ratio_skew"
+        if oi_slope_ok and disp_ok:
+            why = "ratio_skew_oi_slope_disp"
+        elif oi_slope_ok:
+            why = "ratio_skew_oi_slope"
+        else:
+            why = "ratio_skew_disp_1h"
+        # Confidence: MED by default; upgrade if confirm4h present
+        conf2 = "MED" if ctx.ready else "LOW"
+        if confirm4h and conf2 == "MED":
+            conf2 = "HIGH"
+        return Gate2Result(
+            passed=True,
+            reason=why,
+            regime="crowded_squeeze",
+            directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
+            confidence=conf2,
+            alert_only=False,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
+            ratio_long_pct=rlp,
+            funding=funding,
+            funding_z=funding_z,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
+        )
+
+    if crowded_ratio and not (oi_slope_ok or disp_ok):
+        # watch-only: ratio skew present but no confirmation -> avoid chop noise
+        return Gate2Result(
+            passed=False,
+            reason="alert_only_ratio_skew_unconfirmed",
+            regime="crowded_squeeze",
+            directional_bias_hint="no_trade",
+            confidence="MED" if ctx.ready else "LOW",
+            alert_only=True,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
+            ratio_long_pct=rlp,
+            funding=funding,
+            funding_z=funding_z,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
+        )
