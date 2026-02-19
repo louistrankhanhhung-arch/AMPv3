@@ -351,5 +351,3 @@ def build_plan_v0(
         leeway_reason=leeway_reason,
         meta=meta,
     )
-
-** End Patch
