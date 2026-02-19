@@ -180,19 +180,26 @@ def main() -> None:
                 g3 = gate3_structure_confirmation_v0(snap, g1, g2)
                 g3_mode = None
                 g3_trigger = None
+                g3_micro = None
+                g3_disp_score = None
                 try:
                     g3_mode = (g3.notes or {}).get("mode")
                     g3_trigger = (g3.notes or {}).get("trigger")
+                    # micro reason: prefer micro_reason on fail, fallback micro on pass
+                    g3_micro = (g3.notes or {}).get("micro_reason") or (g3.notes or {}).get("micro")
+                    g3_disp_score = (g3.notes or {}).get("disp_score")
                 except Exception:
                     # best-effort; keep None
                     pass
                 log.info(
-                    "G3 %s %s | reason=%s | mode=%s trigger=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                    "G3 %s %s | reason=%s | mode=%s trigger=%s | micro_reason=%s disp_score=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
                     snap.symbol,
                     "PASS" if g3.passed else "FAIL",
                     getattr(g3, "reason", None),
                     g3_mode,
                     g3_trigger,
+                    g3_micro,
+                    g3_disp_score,
                     getattr(g3, "tp2_candidate", None),
                     (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
                     (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
