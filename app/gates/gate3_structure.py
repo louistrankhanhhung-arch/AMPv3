@@ -309,16 +309,27 @@ def _pick_intent(g1: Gate1Result) -> Optional[str]:
     """
     Practical directional intent:
     - If HTF bias is up and price is in discount -> LONG
-    - If HTF bias is down and price is in premium -> SHORT
+    - If HTF bias is down and price is in discount -> SHORT   (your current playbook bias: sell from discount in downtrend)
     - Mid location => no intent (fail-closed), unless you explicitly want mid-range setups later
     """
-    bias = getattr(g1, "bias", None)
-    loc = getattr(g1, "loc", None)
+    # Gate1Result currently exposes:
+    #   - g1.htf.bias, g1.htf.location, g1.htf.pos_pct
+    # and compatibility shims:
+    #   - g1.bias, g1.loc, g1.pos_pct
+    #
+    # Use HTF object if available, fallback to shims.
+    htf = getattr(g1, "htf", None)
+    bias = getattr(htf, "bias", None) if htf is not None else getattr(g1, "bias", None)
+    loc = getattr(htf, "location", None) if htf is not None else getattr(g1, "loc", None)
+
+    bias = str(bias).lower() if bias is not None else None
+    loc = str(loc).lower() if loc is not None else None
+
     if loc == "mid":
         return None
     if bias == "up" and loc == "discount":
         return "LONG"
-    if bias == "down" and loc == "premium":
+    if bias == "down" and loc == "discount":
         return "SHORT"
     # Range bias: keep fail-closed in v0.1 (avoid chop)
     return None
@@ -446,13 +457,24 @@ def gate3_structure_confirmation_v0(
     # Practical intent from HTF bias/location (fail-closed for mid-range / range regimes)
     intent = _pick_intent(g1)
     if intent is None:
+        # Ensure mode is available for logging even on early-fail.
+        _htf = getattr(g1, "htf", None)
+        _bias = getattr(_htf, "bias", None) if _htf is not None else getattr(g1, "bias", None)
+        _loc = getattr(_htf, "location", None) if _htf is not None else getattr(g1, "loc", None)
+        _pos = getattr(_htf, "pos_pct", None) if _htf is not None else getattr(g1, "pos_pct", None)
         return Gate3Result(
             passed=False,
             reason="no_clear_intent_htf",
             structure=structure,
             zone=None,
             tp2_candidate=None,
-            notes={"bias": str(getattr(g1, "bias", None)), "loc": str(getattr(g1, "loc", None))},
+            notes={
+                "mode": mode,
+                "trigger": "n/a",
+                "g1_bias": str(_bias),
+                "g1_loc": str(_loc),
+                "g1_pos": str(_pos),
+            },
             intent=None,
         )
 
