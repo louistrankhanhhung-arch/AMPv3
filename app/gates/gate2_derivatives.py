@@ -290,6 +290,76 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
             oi_slope_4h_pct=oi_slope_4h_pct,
         )
 
+    # --- Ratio-skew relaxation (anti-chop) ---
+    # Rule (per your spec):
+    #   Ratio skew is only "trade-eligible" when:
+    #     (1) OI trend confirms crowding (rolling OI slope in crowd direction), OR
+    #     (2) 1H displacement AGAINST the crowd (liquidation impulse).
+    #
+    # If ratio is skewed but unconfirmed -> ALERT-ONLY (watch), avoid chop noise.
+    #
+    # NOTE: This must live BEFORE healthy_trend/neutral returns, otherwise it's unreachable.
+    oi_slope_ok = False
+    if isinstance(oi_slope_4h_pct, (int, float)) and ratio_skew in ("LONG", "SHORT"):
+        # crowd LONG -> want OI slope positive (crowd building)
+        # crowd SHORT -> want OI slope positive as well (crowd building on shorts)
+        # (If later you compute signed slope by direction, you can refine this.)
+        oi_slope_ok = float(oi_slope_4h_pct) >= 0.10
+
+    disp_ok = _displacement_1h_against_crowd(snapshot, ratio_skew, body_atr_mult=0.60)
+
+    if crowded_ratio and (oi_slope_ok or disp_ok):
+        why = "ratio_skew"
+        if oi_slope_ok and disp_ok:
+            why = "ratio_skew_oi_slope_disp"
+        elif oi_slope_ok:
+            why = "ratio_skew_oi_slope"
+        else:
+            why = "ratio_skew_disp_1h"
+        conf2 = "MED" if ctx.ready else "LOW"
+        if confirm4h and conf2 == "MED":
+            conf2 = "HIGH"
+        return Gate2Result(
+            passed=True,
+            reason=why,
+            regime="crowded_squeeze",
+            directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
+            confidence=conf2,
+            alert_only=False,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
+            ratio_long_pct=rlp,
+            funding=funding,
+            funding_z=funding_z,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
+        )
+
+    if crowded_ratio and not (oi_slope_ok or disp_ok):
+        return Gate2Result(
+            passed=False,
+            reason="alert_only_ratio_skew_unconfirmed",
+            regime="crowded_squeeze",
+            directional_bias_hint="no_trade",
+            confidence="MED" if ctx.ready else "LOW",
+            alert_only=True,
+            confirm4h=confirm4h,
+            confirm4h_reason=confirm4h_reason,
+            ratio_skew=ratio_skew,
+            funding_extreme=bool(extreme_funding),
+            oi_spike=bool(oi_spike),
+            ratio_long_pct=rlp,
+            funding=funding,
+            funding_z=funding_z,
+            oi_delta_pct=oi_delta_pct,
+            oi_spike_z=oi_spike_z,
+            oi_slope_4h_pct=oi_slope_4h_pct,
+        )
+
     # --- Healthy Trend (Regime A) ---
     # Keep strict: requires rolling readiness AND no squeeze (above) AND conservative bands.
     ratio_ok = True
@@ -356,67 +426,3 @@ def gate2_derivatives_regime(snapshot: MarketSnapshot, ctx: Gate2DerivativesCtx)
         oi_spike_z=oi_spike_z,
         oi_slope_4h_pct=oi_slope_4h_pct,
     )
-
-    # --- NEW: Ratio-skew relaxation (anti-chop) ---
-    # Ratio skew is only trade-eligible when:
-    #   - OI trend confirms crowding (rolling slope up), OR
-    #   - There is 1H displacement AGAINST the crowd (liquidation impulse).
-    oi_slope_ok = False
-    if isinstance(oi_slope_4h_pct, (int, float)):
-        oi_slope_ok = float(oi_slope_4h_pct) >= 0.10  # +0.10% per 4H bucket (tunable)
-    disp_ok = _displacement_1h_against_crowd(snapshot, ratio_skew, body_atr_mult=0.60)
-
-    if crowded_ratio and (oi_slope_ok or disp_ok):
-        # trade-eligible crowded squeeze even if funding/oi_spike are not extreme yet
-        why = "ratio_skew"
-        if oi_slope_ok and disp_ok:
-            why = "ratio_skew_oi_slope_disp"
-        elif oi_slope_ok:
-            why = "ratio_skew_oi_slope"
-        else:
-            why = "ratio_skew_disp_1h"
-        # Confidence: MED by default; upgrade if confirm4h present
-        conf2 = "MED" if ctx.ready else "LOW"
-        if confirm4h and conf2 == "MED":
-            conf2 = "HIGH"
-        return Gate2Result(
-            passed=True,
-            reason=why,
-            regime="crowded_squeeze",
-            directional_bias_hint=_directional_hint("crowded_squeeze", ratio_skew),
-            confidence=conf2,
-            alert_only=False,
-            confirm4h=confirm4h,
-            confirm4h_reason=confirm4h_reason,
-            ratio_skew=ratio_skew,
-            funding_extreme=bool(extreme_funding),
-            oi_spike=bool(oi_spike),
-            ratio_long_pct=rlp,
-            funding=funding,
-            funding_z=funding_z,
-            oi_delta_pct=oi_delta_pct,
-            oi_spike_z=oi_spike_z,
-            oi_slope_4h_pct=oi_slope_4h_pct,
-        )
-
-    if crowded_ratio and not (oi_slope_ok or disp_ok):
-        # watch-only: ratio skew present but no confirmation -> avoid chop noise
-        return Gate2Result(
-            passed=False,
-            reason="alert_only_ratio_skew_unconfirmed",
-            regime="crowded_squeeze",
-            directional_bias_hint="no_trade",
-            confidence="MED" if ctx.ready else "LOW",
-            alert_only=True,
-            confirm4h=confirm4h,
-            confirm4h_reason=confirm4h_reason,
-            ratio_skew=ratio_skew,
-            funding_extreme=bool(extreme_funding),
-            oi_spike=bool(oi_spike),
-            ratio_long_pct=rlp,
-            funding=funding,
-            funding_z=funding_z,
-            oi_delta_pct=oi_delta_pct,
-            oi_spike_z=oi_spike_z,
-            oi_slope_4h_pct=oi_slope_4h_pct,
-        )
