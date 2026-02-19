@@ -40,6 +40,55 @@ def _atr(candles, n: int = 14) -> Optional[float]:
         return None
     return sum(trs) / len(trs)
 
+def _confirm_mode(g2: Gate2Result) -> str:
+    """
+    Option 2A: Gate3 is a confirmation gate with mode by derivatives regime.
+      - squeeze: g2.regime == crowded_squeeze (flush/reversal triggers)
+      - trend: default (healthy_trend etc.)
+    """
+    regime = str(getattr(g2, "regime", "") or "").lower()
+    if regime == "crowded_squeeze":
+        return "squeeze"
+    return "trend"
+
+def _displacement_against_crowd_1h(candles_1h, ratio_skew: Optional[str], atr_mult: float = 0.8) -> bool:
+    """
+    Displacement on last 1H candle, with direction against the crowded side.
+      - crowd LONG  -> bearish displacement (close < open)
+      - crowd SHORT -> bullish displacement (close > open)
+    """
+    if not candles_1h or len(candles_1h) < 20:
+        return False
+    a = _atr(candles_1h, 14)
+    if a is None or a <= 0:
+        return False
+    last = candles_1h[-1]
+    body = abs(float(last.c) - float(last.o))
+    if body < atr_mult * a:
+        return False
+    skew = (ratio_skew or "").upper()
+    if skew == "LONG":
+        return float(last.c) < float(last.o)
+    if skew == "SHORT":
+        return float(last.c) > float(last.o)
+    return False
+
+def _sweep_external_1h(candles_1h, level: Optional[float], side: str) -> bool:
+    """
+    External liquidity sweep heuristic on last closed 1H candle.
+      side="ABOVE": wick above level then close back below
+      side="BELOW": wick below level then close back above
+    """
+    if not candles_1h or level is None:
+        return False
+    lvl = float(level)
+    last = candles_1h[-1]
+    if side.upper() == "ABOVE":
+        return float(last.h) > lvl and float(last.c) < lvl
+    if side.upper() == "BELOW":
+        return float(last.l) < lvl and float(last.c) > lvl
+    return False
+
 def _fractal_swings_generic(candles, left: int = 2, right: int = 2):
     """
     Generic fractal swings for any timeframe candles:
@@ -333,6 +382,16 @@ def _tp2_from_gate1(g1: Gate1Result, intent: str) -> Optional[float]:
         return getattr(liq, "above", None) or getattr(liq, "liq_above", None)
     return getattr(liq, "below", None) or getattr(liq, "liq_below", None)
 
+def _liq_levels_from_gate1(g1: Gate1Result) -> tuple[Optional[float], Optional[float]]:
+    """
+    Return (liq_above, liq_below) from Gate1 in a backward-compatible way.
+    """
+    liq = getattr(g1, "liq", None)
+    if liq is None:
+        return None, None
+    above = getattr(liq, "above", None) or getattr(liq, "liq_above", None)
+    below = getattr(liq, "below", None) or getattr(liq, "liq_below", None)
+    return above, below
 
 def gate3_structure_confirmation_v0(
     snapshot: MarketSnapshot,
@@ -341,12 +400,14 @@ def gate3_structure_confirmation_v0(
     min_rr_tp2: float = 2.5,
 ) -> Gate3Result:
     """
-    Gate3 v0: SMC structure + zone selection + candidates (no planning).
+    Gate3 v0 (Option 2A): Confirmation gate (still no planning).
 
     Fail-closed rules:
     - Gate1 must pass
     - Gate2 must pass AND not alert_only
-    - 1H structure must show BOS or CHoCH (close-confirm)
+    - Mode-specific confirmation:
+        * trend: require BOS/CHoCH + displacement (classic)
+        * squeeze: require (CHoCH + displacement) OR (external sweep + displacement against crowd)
     - Must have a usable 15m FVG zone
     - (RR filter is moved to signals/planner.py; Gate3 only returns candidates)
     """
@@ -360,7 +421,7 @@ def gate3_structure_confirmation_v0(
             structure=structure,
             zone=None,
             tp2_candidate=None,
-            notes={"hint": "shadow_mode_ok"},
+            notes={"hint": "shadow_mode_ok", "mode": "n/a"},
             intent=None,
         )
 
@@ -372,21 +433,15 @@ def gate3_structure_confirmation_v0(
             structure=structure,
             zone=None,
             tp2_candidate=None,
-            notes={"g2_regime": str(getattr(g2, "regime", None)), "g2_reason": str(getattr(g2, "reason", None))},
+            notes={
+                "g2_regime": str(getattr(g2, "regime", None)),
+                "g2_reason": str(getattr(g2, "reason", None)),
+                "mode": "n/a",
+            },
             intent=None,
         )
 
-    # Structure must show displacement break (BOS/CHoCH)
-    if not (structure.bos or structure.choch):
-        return Gate3Result(
-            passed=False,
-            reason=f"struct_no_break_{structure.reason}",
-            structure=structure,
-            zone=None,
-            tp2_candidate=None,
-            notes={"trend": structure.trend},
-            intent=None,
-        )
+    mode = _confirm_mode(g2)
 
     # Practical intent from HTF bias/location (fail-closed for mid-range / range regimes)
     intent = _pick_intent(g1)
@@ -401,17 +456,69 @@ def gate3_structure_confirmation_v0(
             intent=None,
         )
 
-    # Require displacement on the breaking 1H candle to reduce false breaks
-    if not _has_displacement(snapshot.candles_1h, atr_mult=0.8):
-        return Gate3Result(
-            passed=False,
-            reason="no_displacement_1h",
-            structure=structure,
-            zone=None,
-            tp2_candidate=None,
-            notes={"struct": structure.reason},
-            intent=intent,
-        )
+    # --- Mode-specific confirmation (Gate3 = confirmation gate) ---
+    trigger = "n/a"
+    if mode == "trend":
+        # Structure must show BOS/CHoCH (close-confirm)
+        if not (structure.bos or structure.choch):
+            return Gate3Result(
+                passed=False,
+                reason=f"struct_no_break_{structure.reason}",
+                structure=structure,
+                zone=None,
+                tp2_candidate=None,
+                notes={"trend": structure.trend, "mode": mode},
+                intent=intent,
+            )
+        # Require displacement to reduce false breaks
+        if not _has_displacement(snapshot.candles_1h, atr_mult=0.8):
+            return Gate3Result(
+                passed=False,
+                reason="no_displacement_1h",
+                structure=structure,
+                zone=None,
+                tp2_candidate=None,
+                notes={"struct": structure.reason, "mode": mode},
+                intent=intent,
+            )
+        trigger = "bos_or_choch+disp"
+    else:
+        # squeeze mode: accept flush/reversal triggers
+        ratio_skew = str(getattr(g2, "ratio_skew", "") or "").upper()
+        liq_above, liq_below = _liq_levels_from_gate1(g1)
+
+        sweep_ok = False
+        if ratio_skew == "LONG":
+            sweep_ok = _sweep_external_1h(snapshot.candles_1h, liq_above, side="ABOVE")
+        elif ratio_skew == "SHORT":
+            sweep_ok = _sweep_external_1h(snapshot.candles_1h, liq_below, side="BELOW")
+
+        disp_against = _displacement_against_crowd_1h(snapshot.candles_1h, ratio_skew, atr_mult=0.8)
+        disp_any = _has_displacement(snapshot.candles_1h, atr_mult=0.8)
+
+        # Accept:
+        #  - CHoCH + displacement (classic reversal), OR
+        #  - external sweep + displacement against crowd (flush impulse)
+        if structure.choch and disp_any:
+            trigger = "choch+disp"
+        elif sweep_ok and disp_against:
+            trigger = "sweep_external+disp_against_crowd"
+        else:
+            return Gate3Result(
+                passed=False,
+                reason="squeeze_no_trigger",
+                structure=structure,
+                zone=None,
+                tp2_candidate=None,
+                notes={
+                    "mode": mode,
+                    "ratio_skew": ratio_skew or "NONE",
+                    "sweep_ok": str(bool(sweep_ok)),
+                    "disp_against": str(bool(disp_against)),
+                    "struct": str(structure.reason),
+                },
+                intent=intent,
+            )
 
     # HYBRID flag: strong displacement => relax acceptance rule in mode2
     strong_disp = _strong_displacement_1h(snapshot.candles_1h, strong_mult=1.2)
@@ -426,12 +533,13 @@ def gate3_structure_confirmation_v0(
             structure=structure,
             zone=None,
             tp2_candidate=None,
-            notes={"zone_count": str(len(zones)), "intent": intent},
+            notes={"zone_count": str(len(zones)), "intent": intent, "mode": mode, "trigger": trigger},
             intent=intent,
         )
 
     # Micro-confirm (15m): choose mode based on derivatives directional hint
-    micro_mode = _pick_micro_mode(g2)
+    # squeeze mode forces reversal-friendly micro confirm (mode1)
+    micro_mode = "mode1" if mode == "squeeze" else _pick_micro_mode(g2)
     if micro_mode == "mode2":
         micro_ok, micro_reason = _micro_confirm_pullback_break_15m(
             snapshot.candles_15m,
@@ -446,7 +554,8 @@ def gate3_structure_confirmation_v0(
             snapshot.candles_15m,
             intent=intent,
             lookback=48,
-            min_break_atr_mult=0.10,
+            # slightly stricter in squeeze mode to reduce chop spam
+            min_break_atr_mult=0.12 if mode == "squeeze" else 0.10,
         )
     if not micro_ok:
         return Gate3Result(
@@ -455,7 +564,14 @@ def gate3_structure_confirmation_v0(
             structure=structure,
             zone=zone,
             tp2_candidate=None,
-            notes={"micro_reason": micro_reason, "micro_mode": micro_mode, "intent": intent, "strong_disp": str(strong_disp)},
+            notes={
+                "micro_reason": micro_reason,
+                "micro_mode": micro_mode,
+                "intent": intent,
+                "strong_disp": str(strong_disp),
+                "mode": mode,
+                "trigger": trigger,
+            },
             intent=intent,
         )
 
@@ -495,6 +611,11 @@ def gate3_structure_confirmation_v0(
             "zone_top": str(top),
             "zone_bot": str(bot),
             "min_rr_tp2_moved_to_planner": str(min_rr_tp2),
+            "mode": mode,
+            "trigger": trigger,
+            "g2_regime": str(getattr(g2, "regime", None)),
+            "g2_reason": str(getattr(g2, "reason", None)),
+            "ratio_skew": str(getattr(g2, "ratio_skew", None)),
         },
         intent=intent,
     )
