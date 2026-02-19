@@ -178,11 +178,21 @@ def main() -> None:
 
                 # Tầng 4 - Gate 3: Structure Confirmation (SMC)
                 g3 = gate3_structure_confirmation_v0(snap, g1, g2)
+                g3_mode = None
+                g3_trigger = None
+                try:
+                    g3_mode = (g3.notes or {}).get("mode")
+                    g3_trigger = (g3.notes or {}).get("trigger")
+                except Exception:
+                    # best-effort; keep None
+                    pass
                 log.info(
-                    "G3 %s %s | reason=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
+                    "G3 %s %s | reason=%s | mode=%s trigger=%s | tp2_candidate=%s | zone=%s | struct=%s trend=%s | break_level=%s",
                     snap.symbol,
                     "PASS" if g3.passed else "FAIL",
                     getattr(g3, "reason", None),
+                    g3_mode,
+                    g3_trigger,
                     getattr(g3, "tp2_candidate", None),
                     (getattr(g3.zone, "kind", None) if getattr(g3, "zone", None) else None),
                     (getattr(g3.structure, "reason", None) if getattr(g3, "structure", None) else None),
@@ -192,10 +202,12 @@ def main() -> None:
 
                 if not g3.passed:
                     log.info(
-                        "JOURNAL %s | ex=%s | stage=G3_FAIL | reason=%s | g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s | struct=%s",
+                        "JOURNAL %s | ex=%s | stage=G3_FAIL | reason=%s | mode=%s trigger=%s | g1=%s/%s pos=%.2f | g2=%s conf=%s hint=%s | struct=%s",
                         snap.symbol,
                         client.name,
                         getattr(g3, "reason", None),
+                        g3_mode,
+                        g3_trigger,
                         (g1.htf.bias if g1.htf else None),
                         (g1.htf.location if g1.htf else None),
                         (g1.htf.pos_pct if g1.htf else -1),
@@ -265,7 +277,7 @@ def main() -> None:
                     getattr(g2, "regime", None),
                     getattr(g2, "confidence", None),
                     getattr(g2, "directional_bias_hint", None),
-                    getattr(g3, "reason", None),
+                    f"{getattr(g3, 'reason', None)}|{g3_mode}|{g3_trigger}",
                     (getattr(getattr(g3, "zone", None), "kind", None)),
                     (getattr(getattr(g3, "zone", None), "fill_pct", None)),
                     plan.leeway_price,
